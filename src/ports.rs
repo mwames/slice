@@ -53,6 +53,8 @@ pub struct ActiveSlice {
     pub branch: String,
     pub worktree: PathBuf,
     pub manifest: PathBuf,
+    /// The slice's time entry, restarted when the slice is reopened (SLICE-2-7).
+    pub timer: TimerId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,8 +131,11 @@ pub trait TimeTracker {
     /// Start a timer for the ticket with the given notes.
     fn start(&self, ticket: &Ticket, notes: &str) -> PortResult<Timer>;
     fn stop(&self, id: TimerId) -> PortResult<()>;
-    /// Restart a stopped timer; undoes `stop`.
-    fn restart(&self, id: TimerId) -> PortResult<()>;
+    /// Restart a stopped timer; undoes `stop`. Returns the id of the running
+    /// timer, which differs from `id` when the entry cannot be restarted (for
+    /// example, it is from an earlier day) and a new one with the same notes
+    /// is started instead.
+    fn restart(&self, id: TimerId) -> PortResult<TimerId>;
     /// Delete an entry; undoes `start`.
     fn delete(&self, id: TimerId) -> PortResult<()>;
 }
@@ -193,7 +198,8 @@ pub struct StatusReport {
 pub enum Mismatch {
     /// A timer is running for a different ticket than the active slice's.
     DifferentTicket { slice: TicketRef, timer: Option<TicketRef> },
-    /// A timer is running with no active slice.
+    /// A timer is running with no active slice, whether or not its notes
+    /// name a ticket.
     TimerWithoutSlice { timer: Option<TicketRef> },
 }
 
@@ -228,6 +234,9 @@ pub enum OpenOutcome {
     Opened(ActiveSlice),
     /// The slice for this ticket was already open; nothing changed (SLICE-2-4).
     AlreadyOpen(ActiveSlice),
+    /// The slice for this ticket was open with no timer running; its timer
+    /// was restarted (SLICE-2-7).
+    Resumed(ActiveSlice),
 }
 
 /// The steps of open, in order. Each successful step pushes its undo.
@@ -246,11 +255,11 @@ pub enum OpenStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpenError {
     /// A different ticket's slice is active; nothing changed (SLICE-2-3).
-    AnotherSliceActive(ActiveSlice),
+    AnotherSliceActive(Box<ActiveSlice>),
     /// The ticket does not exist; nothing changed (SLICE-2-5).
     UnknownTicket(TicketRef),
     /// Preflight status found a mismatch; nothing changed.
-    Inconsistent(StatusReport),
+    Inconsistent(Box<StatusReport>),
     /// A step failed. Earlier steps were undone in reverse order, including
     /// restarting a stopped timer; any undo that itself failed is listed
     /// (SLICE-2-6).

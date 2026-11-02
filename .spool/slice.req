@@ -44,7 +44,8 @@ requirements:
         status: draft
         description: >
           Given a running Harvest timer whose ticket differs from the active
-          slice's ticket, or a running timer with no active slice,
+          slice's ticket, or a running timer with no active slice whether
+          or not its notes name a ticket,
           when status is run,
           then it reports the mismatch with both values and exits non-zero.
 
@@ -105,9 +106,10 @@ requirements:
         title: Stray Timer Running
         status: draft
         description: >
-          Given no active slice and a Harvest timer running for ticket U,
+          Given no active slice and a Harvest timer running for ticket U
+          or for no ticket,
           when slice open is run with ticket T,
-          then the timer for U is stopped before the timer for T starts,
+          then the running timer is stopped before the timer for T starts,
           and the open otherwise completes as in SLICE-2-1.
 
       - id: SLICE-2-3
@@ -145,6 +147,17 @@ requirements:
           then it undoes the earlier steps it performed in reverse order,
           including restarting any timer it stopped, reports which step
           failed, and exits non-zero.
+
+      - id: SLICE-2-7
+        title: Same Slice Timer Stopped
+        status: draft
+        description: >
+          Given an active slice for ticket T and no running Harvest timer,
+          when slice open is run with ticket T,
+          then a timer for T is running with the slice id in its notes,
+          the ticket, branch, worktree, and manifest are unchanged,
+          it reports that the slice was already open and its timer
+          restarted, and it exits zero.
 
     invariants:
       - id: SLICE-2-I1
