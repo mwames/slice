@@ -7,7 +7,7 @@ requirements:
       The slice CLI reports the current state of slice work: the active
       slice, the running Harvest timer, and the ticket's status. It is the
       read-back every other slice command and the orchestrator rely on.
-    status: draft                  # kept for current Spool; derived from items once extensions land
+    status: active                 # kept for current Spool; derived from items once extensions land
     interface: src/ports.rs
     deciders:
       - Matty
@@ -24,7 +24,7 @@ requirements:
     acceptance_criteria:
       - id: SLICE-1-1
         title: Nothing Active
-        status: draft
+        status: active
         description: >
           Given no active slice and no running Harvest timer,
           when status is run,
@@ -32,7 +32,7 @@ requirements:
 
       - id: SLICE-1-2
         title: Active Slice
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket T with a running timer for T,
           when status is run,
@@ -41,7 +41,7 @@ requirements:
 
       - id: SLICE-1-3
         title: State Mismatch
-        status: draft
+        status: active
         description: >
           Given a running Harvest timer whose ticket differs from the active
           slice's ticket, or a running timer with no active slice whether
@@ -51,7 +51,7 @@ requirements:
 
       - id: SLICE-1-4
         title: Source Unavailable
-        status: draft
+        status: active
         description: >
           Given Harvest or the ticket system cannot be reached,
           when status is run,
@@ -61,7 +61,7 @@ requirements:
     invariants:
       - id: SLICE-1-I1
         title: Status Is Read-Only
-        status: draft
+        status: active
         description: >
           For every run of status, in every starting state, Harvest, the
           ticket system, and local slice state are unchanged afterward.
@@ -72,7 +72,7 @@ requirements:
       Running slice open with a ticket number starts work on that ticket:
       a Harvest timer, an in-progress ticket, a branch and worktree, and a
       slice manifest, all checked against status before anything changes.
-    status: draft                  # kept for current Spool; derived from items once extensions land
+    status: active                 # kept for current Spool; derived from items once extensions land
     interface: src/ports.rs
     deciders:
       - Matty
@@ -93,7 +93,7 @@ requirements:
     acceptance_criteria:
       - id: SLICE-2-1
         title: Clean Open
-        status: draft
+        status: active
         description: >
           Given no active slice and no running Harvest timer,
           when slice open is run with a valid ticket number T,
@@ -104,7 +104,7 @@ requirements:
 
       - id: SLICE-2-2
         title: Stray Timer Running
-        status: draft
+        status: active
         description: >
           Given no active slice and a Harvest timer running for ticket U
           or for no ticket,
@@ -114,7 +114,7 @@ requirements:
 
       - id: SLICE-2-3
         title: Another Slice Active
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket U,
           when slice open is run with a different ticket T,
@@ -123,7 +123,7 @@ requirements:
 
       - id: SLICE-2-4
         title: Same Slice Already Open
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket T with its timer running,
           when slice open is run with ticket T,
@@ -132,7 +132,7 @@ requirements:
 
       - id: SLICE-2-5
         title: Unknown Ticket
-        status: draft
+        status: active
         description: >
           Given a ticket number that does not exist in the ticket system,
           when slice open is run with it,
@@ -140,7 +140,7 @@ requirements:
 
       - id: SLICE-2-6
         title: Partial Failure
-        status: draft
+        status: active
         description: >
           Given a step of slice open fails after an earlier step succeeded,
           when slice open is run,
@@ -150,7 +150,7 @@ requirements:
 
       - id: SLICE-2-7
         title: Same Slice Timer Stopped
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket T and no running Harvest timer,
           when slice open is run with ticket T,
@@ -162,14 +162,14 @@ requirements:
     invariants:
       - id: SLICE-2-I1
         title: At Most One Running Timer
-        status: draft
+        status: active
         description: >
           For every starting state and every outcome of slice open,
           at most one Harvest timer is running afterward.
 
       - id: SLICE-2-I2
         title: Failed Open Leaves No Trace
-        status: draft
+        status: active
         description: >
           For every run of slice open that exits non-zero, no time entry it
           started still exists, any timer it stopped is running again, no
