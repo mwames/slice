@@ -110,7 +110,7 @@ requirements:
     acceptance_criteria:
       - id: SLICE-2-1
         title: Clean Open
-        status: draft
+        status: active
         description: >
           Given no active slice, no running Harvest timer, and no Harvest
           entry for T today,
@@ -159,7 +159,7 @@ requirements:
 
       - id: SLICE-2-6
         title: Partial Failure
-        status: draft
+        status: active
         description: >
           Given a step of slice open fails after an earlier step succeeded,
           when slice open is run,
@@ -171,7 +171,7 @@ requirements:
 
       - id: SLICE-2-9
         title: Ticket Branch Exists
-        status: draft
+        status: active
         description: >
           Given no active slice and exactly one existing branch for T, from
           an earlier slice, with or without its worktree,
@@ -184,7 +184,7 @@ requirements:
 
       - id: SLICE-2-10
         title: Branch Options Conflict
-        status: draft
+        status: active
         description: >
           Given an existing branch for T,
           when slice open is run with T and --base, or with a --type other
@@ -194,7 +194,7 @@ requirements:
 
       - id: SLICE-2-11
         title: Type Required For New Branch
-        status: draft
+        status: active
         description: >
           Given no existing branch for T,
           when slice open is run with T and no --type,
@@ -203,7 +203,7 @@ requirements:
 
       - id: SLICE-2-12
         title: Ambiguous Ticket Branch
-        status: draft
+        status: active
         description: >
           Given more than one existing branch for T,
           when slice open is run with T,
@@ -212,7 +212,7 @@ requirements:
 
       - id: SLICE-2-8
         title: Ticket Already Tracked Today
-        status: draft
+        status: active
         description: >
           Given no active slice, no running Harvest timer, and a stopped
           Harvest entry for T dated today,
@@ -222,7 +222,7 @@ requirements:
 
       - id: SLICE-2-7
         title: Same Slice Timer Stopped
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket T and no running Harvest timer,
           when slice open is run with ticket T,
@@ -257,7 +257,7 @@ requirements:
       Running slice pause stops the active slice's timer when you switch
       away, leaving the slice, its ticket, branch, worktree, and manifest
       as they are so it can be resumed later.
-    status: draft
+    status: active
     interface: src/ports.rs
     deciders:
       - Matty
@@ -275,7 +275,7 @@ requirements:
     acceptance_criteria:
       - id: SLICE-3-1
         title: Pause Running Slice
-        status: draft
+        status: active
         description: >
           Given an active slice whose timer is running,
           when slice pause is run,
@@ -284,7 +284,7 @@ requirements:
 
       - id: SLICE-3-2
         title: Already Paused
-        status: draft
+        status: active
         description: >
           Given an active slice and no running Harvest timer,
           when slice pause is run,
@@ -293,7 +293,7 @@ requirements:
 
       - id: SLICE-3-3
         title: Nothing To Pause
-        status: draft
+        status: active
         description: >
           Given no active slice,
           when slice pause is run,
@@ -303,7 +303,7 @@ requirements:
 
       - id: SLICE-3-4
         title: Pause Mismatch
-        status: draft
+        status: active
         description: >
           Given an active slice and a running Harvest timer for a different
           ticket or for no ticket,
@@ -314,7 +314,7 @@ requirements:
     invariants:
       - id: SLICE-3-I1
         title: Pause Never Starts Or Deletes
-        status: draft
+        status: active
         description: >
           For every starting state, slice pause starts no timer, deletes no
           time entry, and leaves the ticket, local slice state, and manifest
@@ -325,7 +325,7 @@ requirements:
     description: >
       Running slice resume restarts the paused active slice's timer, without
       needing the ticket number.
-    status: draft
+    status: active
     interface: src/ports.rs
     deciders:
       - Matty
@@ -342,7 +342,7 @@ requirements:
     acceptance_criteria:
       - id: SLICE-4-1
         title: Resume Paused Slice
-        status: draft
+        status: active
         description: >
           Given an active slice and no running Harvest timer,
           when slice resume is run,
@@ -352,7 +352,7 @@ requirements:
 
       - id: SLICE-4-2
         title: Already Running
-        status: draft
+        status: active
         description: >
           Given an active slice whose timer is running,
           when slice resume is run,
@@ -361,7 +361,7 @@ requirements:
 
       - id: SLICE-4-3
         title: Nothing To Resume
-        status: draft
+        status: active
         description: >
           Given no active slice,
           when slice resume is run,
@@ -371,7 +371,7 @@ requirements:
 
       - id: SLICE-4-4
         title: Resume Mismatch
-        status: draft
+        status: active
         description: >
           Given an active slice and a running Harvest timer for a different
           ticket or for no ticket,
@@ -382,7 +382,7 @@ requirements:
     invariants:
       - id: SLICE-4-I1
         title: Resume Keeps One Timer
-        status: draft
+        status: active
         description: >
           For every starting state and every outcome of slice resume, at most
           one Harvest timer is running afterward, and no time entry is
@@ -395,7 +395,7 @@ requirements:
       ticket moves to review (or done), the manifest is marked closed, and
       no slice is active afterward. The
       branch and worktree are left for review and merge.
-    status: draft
+    status: active
     interface: src/ports.rs
     deciders:
       - Matty
@@ -421,7 +421,7 @@ requirements:
     acceptance_criteria:
       - id: SLICE-5-1
         title: Close To Review
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket T,
           when slice close is run,
@@ -431,7 +431,7 @@ requirements:
 
       - id: SLICE-5-2
         title: Close To Done
-        status: draft
+        status: active
         description: >
           Given an active slice for ticket T,
           when slice close is run with --done,
@@ -440,7 +440,7 @@ requirements:
 
       - id: SLICE-5-3
         title: Close Paused Slice
-        status: draft
+        status: active
         description: >
           Given an active slice and no running Harvest timer,
           when slice close is run,
@@ -449,7 +449,7 @@ requirements:
 
       - id: SLICE-5-4
         title: Nothing To Close
-        status: draft
+        status: active
         description: >
           Given no active slice,
           when slice close is run,
@@ -459,7 +459,7 @@ requirements:
 
       - id: SLICE-5-5
         title: Close Mismatch
-        status: draft
+        status: active
         description: >
           Given an active slice and a running Harvest timer for a different
           ticket or for no ticket,
@@ -469,7 +469,7 @@ requirements:
 
       - id: SLICE-5-6
         title: Close Partial Failure
-        status: draft
+        status: active
         description: >
           Given a step of slice close fails after an earlier step succeeded,
           when slice close is run,
@@ -480,7 +480,7 @@ requirements:
     invariants:
       - id: SLICE-5-I1
         title: Failed Close Leaves No Trace
-        status: draft
+        status: active
         description: >
           For every run of slice close that exits non-zero, the slice is
           still active, its timer's running state, the ticket's status, and
