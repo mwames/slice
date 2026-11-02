@@ -53,6 +53,7 @@ fn manifest() -> Manifest {
         id: SliceId("ENG-1-1".into()),
         ticket: TicketRef("ENG-1".into()),
         ticket_system: TicketSystemKind::ClickUp,
+        branch: "feature/20261102-ENG-1-login".into(),
         base_commit: "abc1234".into(),
         status: ManifestStatus::Open,
         acceptance_criteria: vec![],
@@ -63,67 +64,114 @@ fn manifest() -> Manifest {
     }
 }
 
+const BRANCH: &str = "feature/20261102-ENG-1-login";
+
+fn branch_exists(repo: &Path, branch: &str) -> bool {
+    git(repo, &["branch", "--list", branch]) != ""
+}
+
 #[test]
-fn git_resolves_and_creates_and_removes_a_worktree() {
-    let repo = repo("git");
+fn git_resolves_commits_and_branches() {
+    let repo = repo("resolve");
     let head = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", BRANCH]);
 
     assert_eq!(Git.resolve(&repo, "HEAD").unwrap(), head);
+    assert_eq!(Git.resolve(&repo, BRANCH).unwrap(), head);
     let err = Git.resolve(&repo, "no-such-ref").unwrap_err();
     assert_eq!(err.source, Source::Git);
+}
 
-    let worktree = repo.parent().unwrap().join("app.slices/ENG-1-1");
-    Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head).unwrap();
+#[test]
+fn git_lists_local_branches() {
+    let repo = repo("branches");
+    git(&repo, &["branch", BRANCH]);
+    git(&repo, &["branch", "bug/20261020-ENG-1-crash"]);
+
+    let mut branches = Git.branches(&repo).unwrap();
+    branches.sort();
+
+    assert_eq!(branches, ["bug/20261020-ENG-1-crash", BRANCH, "main"]);
+}
+
+#[test]
+fn git_creates_and_removes_a_branch_with_worktree() {
+    let repo = repo("create");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let worktree = repo.parent().unwrap().join("app.slices/x");
+
+    Git.create_branch(&repo, BRANCH, &worktree, &head).unwrap();
+
     assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(&worktree, &["branch", "--show-current"]), "slice/ENG-1-1");
+    assert_eq!(git(&worktree, &["branch", "--show-current"]), BRANCH);
     let upstream = Command::new("git")
         .arg("-C")
         .arg(&worktree)
         .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
         .output()
         .unwrap();
-    assert!(!upstream.status.success(), "slice branch has no upstream");
+    assert!(!upstream.status.success(), "branch has no upstream");
+    let found = Git.worktree_of(&repo, BRANCH).unwrap().expect("worktree found");
+    assert_eq!(found.canonicalize().unwrap(), worktree.canonicalize().unwrap());
 
-    Git.remove_worktree(&repo, "slice/ENG-1-1", &worktree).unwrap();
+    Git.remove_branch(&repo, BRANCH, &worktree).unwrap();
     assert!(!worktree.exists());
-    assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "");
+    assert!(!branch_exists(&repo, BRANCH));
+}
+
+#[test]
+fn git_adds_and_removes_a_worktree_for_an_existing_branch() {
+    let repo = repo("add");
+    git(&repo, &["branch", BRANCH]);
+    let worktree = repo.parent().unwrap().join("app.slices/x");
+    assert_eq!(Git.worktree_of(&repo, BRANCH).unwrap(), None);
+
+    Git.add_worktree(&repo, BRANCH, &worktree).unwrap();
+    assert_eq!(git(&worktree, &["branch", "--show-current"]), BRANCH);
+    assert!(Git.worktree_of(&repo, BRANCH).unwrap().is_some());
+
+    Git.remove_worktree(&repo, &worktree).unwrap();
+    assert!(!worktree.exists());
+    assert!(branch_exists(&repo, BRANCH), "branch kept");
+    assert_eq!(Git.worktree_of(&repo, BRANCH).unwrap(), None);
+}
+
+#[test]
+fn git_worktree_of_the_main_checkout() {
+    let repo = repo("main");
+
+    let found = Git.worktree_of(&repo, "main").unwrap().expect("main is checked out");
+
+    assert_eq!(found.canonicalize().unwrap(), repo.canonicalize().unwrap());
 }
 
 /// Found in a live run: `git worktree add -b` creates the branch before it
-/// notices the path exists, and a failed step is not undone by open, so the
-/// adapter must not leave a branch behind.
+/// notices the path exists, so the adapter must not leave a branch behind.
 #[test]
-fn git_failed_worktree_leaves_no_branch() {
+fn git_failed_create_leaves_no_branch() {
     let repo = repo("blocked");
     let head = git(&repo, &["rev-parse", "HEAD"]);
-    let worktree = repo.parent().unwrap().join("app.slices/ENG-1-1");
+    let worktree = repo.parent().unwrap().join("app.slices/x");
     std::fs::create_dir_all(&worktree).unwrap();
     std::fs::write(worktree.join("file"), "in the way").unwrap();
 
-    let err = Git
-        .create_worktree(&repo, "slice/ENG-1-1", &worktree, &head)
-        .unwrap_err();
+    let err = Git.create_branch(&repo, BRANCH, &worktree, &head).unwrap_err();
 
     assert_eq!(err.source, Source::Git);
-    assert_eq!(
-        git(&repo, &["branch", "--list", "slice/ENG-1-1"]),
-        "",
-        "no branch left behind"
-    );
+    assert!(!branch_exists(&repo, BRANCH), "no branch left behind");
 }
 
 /// The cleanup above must never delete a branch that existed before.
 #[test]
-fn git_failed_worktree_keeps_existing_branch() {
+fn git_failed_create_keeps_existing_branch() {
     let repo = repo("existing");
     let head = git(&repo, &["rev-parse", "HEAD"]);
-    git(&repo, &["branch", "slice/ENG-1-1"]);
-    let worktree = repo.parent().unwrap().join("app.slices/ENG-1-1");
+    git(&repo, &["branch", BRANCH]);
+    let worktree = repo.parent().unwrap().join("app.slices/x");
 
-    Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head)
-        .unwrap_err();
+    Git.create_branch(&repo, BRANCH, &worktree, &head).unwrap_err();
 
-    assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "slice/ENG-1-1");
+    assert!(branch_exists(&repo, BRANCH));
 }
 
 #[test]
@@ -150,10 +198,8 @@ fn state_round_trips_the_active_slice_and_counts_slices() {
         id: SliceId("ENG-1-1".into()),
         ticket: ticket.clone(),
         repo: PathBuf::from("/work/app"),
-        branch: "slice/ENG-1-1".into(),
-        worktree: PathBuf::from("/work/app.slices/ENG-1-1"),
-        manifest: PathBuf::from("/work/app.slices/ENG-1-1/.slices/ENG-1-1.yaml"),
-        timer: TimerId(42),
+        branch: BRANCH.into(),
+        worktree: PathBuf::from("/work/app.slices/x"),
     };
     state.set_active(&slice).unwrap();
     assert_eq!(state.active().unwrap(), Some(slice));
@@ -180,41 +226,73 @@ fn state_reports_a_corrupt_file_as_local_state() {
 }
 
 #[test]
-fn manifest_written_as_yaml_and_removed() {
+fn manifests_kept_in_state_by_slice_id() {
     let dir = temp_dir("manifest");
     let state = FileState::new(dir.join("state"));
-    let path = dir.join("wt/.slices/ENG-1-1.yaml");
+    let id = SliceId("ENG-1-1".into());
+    assert_eq!(state.read_manifest(&id).unwrap(), None);
 
-    state.write_manifest(&path, &manifest()).unwrap();
+    state.write_manifest(&manifest()).unwrap();
+    let path = dir.join("state/manifests/ENG-1-1.yaml");
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(text, manifest_yaml(&manifest()));
     assert!(text.contains("ticket: \"ENG-1\"\n"));
+    assert!(text.contains("branch: \"feature/20261102-ENG-1-login\"\n"));
     assert!(text.contains("base_commit: \"abc1234\"\n"));
-    assert!(text.contains("acceptance_criteria: []\n"));
+    assert_eq!(state.read_manifest(&id).unwrap(), Some(manifest()));
 
-    state.remove_manifest(&path).unwrap();
+    let closed = Manifest {
+        status: ManifestStatus::Closed,
+        ..manifest()
+    };
+    state.write_manifest(&closed).unwrap();
+    assert!(std::fs::read_to_string(&path).unwrap().contains("status: closed\n"));
+    assert_eq!(state.read_manifest(&id).unwrap(), Some(closed));
+
+    state.remove_manifest(&id).unwrap();
     assert!(!path.exists());
-    state.remove_manifest(&path).unwrap();
+    state.remove_manifest(&id).unwrap();
 }
 
 #[test]
 fn config_defaults_and_overrides() {
     let defaults = Config::parse("").unwrap().settings();
-    assert_eq!(defaults.clickup_in_progress, "development");
-    assert_eq!(defaults.monday_in_progress, "In Progress");
-    assert_eq!(defaults.branch_prefix, "slice/");
+    assert_eq!(
+        defaults.in_progress,
+        Statuses {
+            clickup: "development".into(),
+            monday: "In Progress".into()
+        }
+    );
+    assert_eq!(
+        defaults.review,
+        Statuses {
+            clickup: "dev complete".into(),
+            monday: "Waiting for review".into()
+        }
+    );
+    assert_eq!(
+        defaults.done,
+        Statuses {
+            clickup: "complete".into(),
+            monday: "Done".into()
+        }
+    );
     assert_eq!(defaults.worktree_root, None);
 
     let cfg = Config::parse(
-        "branch_prefix = \"s/\"\nworktree_root = \"/tmp/slices\"\n[status.in_progress]\nclickup = \"doing\"\n[harvest]\nproject = \"P\"\ntask = \"T\"\n",
+        "worktree_root = \"/tmp/slices\"\n[status.in_progress]\nclickup = \"doing\"\n[status.done]\nmonday = \"Shipped\"\n[harvest]\nproject = \"P\"\ntask = \"T\"\n",
     )
     .unwrap();
     let s = cfg.settings();
-    assert_eq!(s.clickup_in_progress, "doing");
-    assert_eq!(s.monday_in_progress, "In Progress");
-    assert_eq!(s.branch_prefix, "s/");
+    assert_eq!(s.in_progress.clickup, "doing");
+    assert_eq!(s.in_progress.monday, "In Progress");
+    assert_eq!(s.done.monday, "Shipped");
     assert_eq!(s.worktree_root, Some(PathBuf::from("/tmp/slices")));
     assert_eq!((cfg.harvest.project.as_str(), cfg.harvest.task.as_str()), ("P", "T"));
 
-    assert!(Config::parse("typo = 1").is_err(), "unknown keys are rejected");
+    assert!(
+        Config::parse("branch_prefix = \"s/\"").is_err(),
+        "removed and unknown keys are rejected"
+    );
 }

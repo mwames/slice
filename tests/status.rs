@@ -26,7 +26,7 @@ fn active_slice() {
 
     assert_eq!(report.active.as_ref(), Some(&slice));
     let timer = report.timer.as_ref().expect("running timer reported");
-    assert_eq!(timer.id, slice.timer);
+    assert_eq!(Some(timer.id), fake.entry_today(&tref(T)).unwrap());
     assert_eq!(timer.ticket, Some(tref(T)));
     let ticket = report.ticket.as_ref().expect("ticket reported");
     assert_eq!(ticket.reference, tref(T));
