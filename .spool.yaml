@@ -1,0 +1,4 @@
+test_patterns:
+  - "**/*.rs"
+exclude_patterns:
+  - "**/target"

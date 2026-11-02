@@ -1,0 +1,162 @@
+feature: SLICE
+
+requirements:
+  - id: SLICE-1
+    title: Slice Status
+    description: >
+      The slice CLI reports the current state of slice work: the active
+      slice, the running Harvest timer, and the ticket's status. It is the
+      read-back every other slice command and the orchestrator rely on.
+    status: draft                  # kept for current Spool; derived from items once extensions land
+    interface: src/ports.rs
+    deciders:
+      - Matty
+    consulted: []
+    date: 2026-10-27
+    rationale: >
+      The one-timer rule and idempotent commands both depend on knowing the
+      current state before acting. A read-only status command is the safest
+      first piece and doubles as the orchestrator's read-back check.
+    superseded_by:
+    out_of_scope:
+      - History or reporting of past slices
+      - Slack focus status
+    acceptance_criteria:
+      - id: SLICE-1-1
+        title: Nothing Active
+        status: draft
+        description: >
+          Given no active slice and no running Harvest timer,
+          when status is run,
+          then it reports no active slice and no running timer and exits zero.
+
+      - id: SLICE-1-2
+        title: Active Slice
+        status: draft
+        description: >
+          Given an active slice for ticket T with a running timer for T,
+          when status is run,
+          then it reports ticket T, the slice id, the running timer,
+          and the ticket's current status, and exits zero.
+
+      - id: SLICE-1-3
+        title: State Mismatch
+        status: draft
+        description: >
+          Given a running Harvest timer whose ticket differs from the active
+          slice's ticket, or a running timer with no active slice,
+          when status is run,
+          then it reports the mismatch with both values and exits non-zero.
+
+      - id: SLICE-1-4
+        title: Source Unavailable
+        status: draft
+        description: >
+          Given Harvest or the ticket system cannot be reached,
+          when status is run,
+          then it names the source that failed and exits non-zero,
+          and does not report that source's state as empty.
+
+    invariants:
+      - id: SLICE-1-I1
+        title: Status Is Read-Only
+        status: draft
+        description: >
+          For every run of status, in every starting state, Harvest, the
+          ticket system, and local slice state are unchanged afterward.
+
+  - id: SLICE-2
+    title: Slice Open
+    description: >
+      Running slice open with a ticket number starts work on that ticket:
+      a Harvest timer, an in-progress ticket, a branch and worktree, and a
+      slice manifest, all checked against status before anything changes.
+    status: draft                  # kept for current Spool; derived from items once extensions land
+    interface: src/ports.rs
+    deciders:
+      - Matty
+    consulted: []
+    date: 2026-10-27
+    rationale: >
+      Opening a slice is the entry point for every unit of work and exercises
+      both integrations that matter most: Harvest timers and ticket updates.
+      Making it deterministic means housekeeping never depends on the
+      orchestrator remembering to do it.
+    superseded_by:
+    out_of_scope:
+      - Pausing, resuming, or closing slices
+      - Spec authoring and approval
+      - Launching test or implementation agents
+      - Choosing which ticket to work on
+      - Slack focus status
+    acceptance_criteria:
+      - id: SLICE-2-1
+        title: Clean Open
+        status: draft
+        description: >
+          Given no active slice and no running Harvest timer,
+          when slice open is run with a valid ticket number T,
+          then a Harvest timer is running for T with the slice id in its notes,
+          ticket T is in progress, a branch and worktree exist for the slice,
+          a slice manifest records T and the base commit,
+          and the slice is active.
+
+      - id: SLICE-2-2
+        title: Stray Timer Running
+        status: draft
+        description: >
+          Given no active slice and a Harvest timer running for ticket U,
+          when slice open is run with ticket T,
+          then the timer for U is stopped before the timer for T starts,
+          and the open otherwise completes as in SLICE-2-1.
+
+      - id: SLICE-2-3
+        title: Another Slice Active
+        status: draft
+        description: >
+          Given an active slice for ticket U,
+          when slice open is run with a different ticket T,
+          then it fails, names the active slice for U,
+          and changes nothing.
+
+      - id: SLICE-2-4
+        title: Same Slice Already Open
+        status: draft
+        description: >
+          Given an active slice for ticket T with its timer running,
+          when slice open is run with ticket T,
+          then it reports that the slice is already open, changes nothing,
+          and exits zero.
+
+      - id: SLICE-2-5
+        title: Unknown Ticket
+        status: draft
+        description: >
+          Given a ticket number that does not exist in the ticket system,
+          when slice open is run with it,
+          then it fails with an error naming the ticket and changes nothing.
+
+      - id: SLICE-2-6
+        title: Partial Failure
+        status: draft
+        description: >
+          Given a step of slice open fails after an earlier step succeeded,
+          when slice open is run,
+          then it undoes the earlier steps it performed, reports which step
+          failed, and exits non-zero.
+
+    invariants:
+      - id: SLICE-2-I1
+        title: At Most One Running Timer
+        status: draft
+        description: >
+          For every starting state and every outcome of slice open,
+          at most one Harvest timer is running afterward.
+
+      - id: SLICE-2-I2
+        title: Failed Open Leaves No Trace
+        status: draft
+        description: >
+          For every run of slice open that exits non-zero, no timer it started
+          is still running, no manifest exists for the slice, and the ticket's
+          status is what it was before the run.
