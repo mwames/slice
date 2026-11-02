@@ -100,10 +100,16 @@ fn git_failed_worktree_leaves_no_branch() {
     std::fs::create_dir_all(&worktree).unwrap();
     std::fs::write(worktree.join("file"), "in the way").unwrap();
 
-    let err = Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head).unwrap_err();
+    let err = Git
+        .create_worktree(&repo, "slice/ENG-1-1", &worktree, &head)
+        .unwrap_err();
 
     assert_eq!(err.source, Source::Git);
-    assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "", "no branch left behind");
+    assert_eq!(
+        git(&repo, &["branch", "--list", "slice/ENG-1-1"]),
+        "",
+        "no branch left behind"
+    );
 }
 
 /// The cleanup above must never delete a branch that existed before.
@@ -114,7 +120,8 @@ fn git_failed_worktree_keeps_existing_branch() {
     git(&repo, &["branch", "slice/ENG-1-1"]);
     let worktree = repo.parent().unwrap().join("app.slices/ENG-1-1");
 
-    Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head).unwrap_err();
+    Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head)
+        .unwrap_err();
 
     assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "slice/ENG-1-1");
 }
