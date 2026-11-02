@@ -2,3 +2,5 @@ test_patterns:
   - "**/*.rs"
 exclude_patterns:
   - "**/target"
+severity:
+  untested_ac: error
