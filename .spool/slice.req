@@ -85,8 +85,12 @@ requirements:
       orchestrator remembering to do it. Harvest is tracked per ticket per
       day: every slice of ticket T on a given day logs to T's one entry for
       that day, the most recently updated entry dated today whose notes name
-      T. Slice ids are internal to slice and never appear in Harvest notes or
-      on tickets.
+      T. A branch belongs to a feature, the ticket, and a slice is one step
+      of it: every slice of T works on T's one branch and worktree, named
+      for T alone. Slice ids are internal to slice and never appear in
+      Harvest notes, on tickets, or in branch names; commits made during a
+      slice carry its id in their message, by convention rather than by
+      anything slice enforces.
     superseded_by:
     out_of_scope:
       - Pausing, resuming, or closing slices
@@ -103,7 +107,8 @@ requirements:
           entry for T today,
           when slice open is run with a valid ticket number T,
           then a new Harvest entry for T is running, noted with T and the
-          ticket's title only, ticket T is in progress, a branch and worktree exist for the slice,
+          ticket's title only, ticket T is in progress, a branch named for T without the slice id
+          exists with its worktree,
           a slice manifest records T and the base commit,
           and the slice is active.
 
@@ -151,8 +156,21 @@ requirements:
           when slice open is run,
           then it undoes the earlier steps it performed in reverse order,
           including restarting any timer it stopped, deleting an entry only
-          if this run created it, and stopping an existing entry it
-          restarted, reports which step failed, and exits non-zero.
+          if this run created it, stopping an existing entry it restarted,
+          and removing a branch or worktree only if this run created it,
+          reports which step failed, and exits non-zero.
+
+      - id: SLICE-2-9
+        title: Ticket Branch Exists
+        status: draft
+        description: >
+          Given no active slice and an existing branch for T from an earlier
+          slice, with or without its worktree,
+          when slice open is run with T,
+          then the slice uses that branch, its worktree exists, creating it
+          if missing, no other branch is created, the manifest's base commit
+          is the branch's head, and the open otherwise completes as in
+          SLICE-2-1.
 
       - id: SLICE-2-8
         title: Ticket Already Tracked Today
@@ -190,8 +208,10 @@ requirements:
         description: >
           For every run of slice open that exits non-zero, no time entry it
           created still exists, every entry that existed before is still
-          there and running or stopped as it was, no manifest exists for the
-          slice, and the ticket's status is what it was before the run.
+          there and running or stopped as it was, no branch or worktree it
+          created still exists, every branch and worktree that existed
+          before still does, no manifest exists for the slice, and the
+          ticket's status is what it was before the run.
 
   - id: SLICE-3
     title: Slice Pause
@@ -239,7 +259,8 @@ requirements:
         description: >
           Given no active slice,
           when slice pause is run,
-          then it reports that no slice is active, changes nothing,
+          then it prints a single line saying no slice is active, changes
+          nothing,
           and exits non-zero.
 
       - id: SLICE-3-4
@@ -306,7 +327,8 @@ requirements:
         description: >
           Given no active slice,
           when slice resume is run,
-          then it reports that no slice is active, changes nothing,
+          then it prints a single line saying no slice is active, changes
+          nothing,
           and exits non-zero.
 
       - id: SLICE-4-4
@@ -393,7 +415,8 @@ requirements:
         description: >
           Given no active slice,
           when slice close is run,
-          then it reports that no slice is active, changes nothing,
+          then it prints a single line saying no slice is active, changes
+          nothing,
           and exits non-zero.
 
       - id: SLICE-5-5
