@@ -82,7 +82,11 @@ requirements:
       Opening a slice is the entry point for every unit of work and exercises
       both integrations that matter most: Harvest timers and ticket updates.
       Making it deterministic means housekeeping never depends on the
-      orchestrator remembering to do it.
+      orchestrator remembering to do it. Harvest is tracked per ticket per
+      day: every slice of ticket T on a given day logs to T's one entry for
+      that day, the most recently updated entry dated today whose notes name
+      T. Slice ids are internal to slice and never appear in Harvest notes or
+      on tickets.
     superseded_by:
     out_of_scope:
       - Pausing, resuming, or closing slices
@@ -93,12 +97,13 @@ requirements:
     acceptance_criteria:
       - id: SLICE-2-1
         title: Clean Open
-        status: active
+        status: draft
         description: >
-          Given no active slice and no running Harvest timer,
+          Given no active slice, no running Harvest timer, and no Harvest
+          entry for T today,
           when slice open is run with a valid ticket number T,
-          then a Harvest timer is running for T with the slice id in its notes,
-          ticket T is in progress, a branch and worktree exist for the slice,
+          then a new Harvest entry for T is running, noted with T and the
+          ticket's title only, ticket T is in progress, a branch and worktree exist for the slice,
           a slice manifest records T and the base commit,
           and the slice is active.
 
@@ -140,21 +145,33 @@ requirements:
 
       - id: SLICE-2-6
         title: Partial Failure
-        status: active
+        status: draft
         description: >
           Given a step of slice open fails after an earlier step succeeded,
           when slice open is run,
           then it undoes the earlier steps it performed in reverse order,
-          including restarting any timer it stopped, reports which step
-          failed, and exits non-zero.
+          including restarting any timer it stopped, deleting an entry only
+          if this run created it, and stopping an existing entry it
+          restarted, reports which step failed, and exits non-zero.
+
+      - id: SLICE-2-8
+        title: Ticket Already Tracked Today
+        status: draft
+        description: >
+          Given no active slice, no running Harvest timer, and a stopped
+          Harvest entry for T dated today,
+          when slice open is run with T,
+          then that entry is running again, no new entry is created,
+          and the open otherwise completes as in SLICE-2-1.
 
       - id: SLICE-2-7
         title: Same Slice Timer Stopped
-        status: active
+        status: draft
         description: >
           Given an active slice for ticket T and no running Harvest timer,
           when slice open is run with ticket T,
-          then a timer for T is running with the slice id in its notes,
+          then T's entry for today is running, restarted if it exists and
+          started otherwise,
           the ticket, branch, worktree, and manifest are unchanged,
           it reports that the slice was already open and its timer
           restarted, and it exits zero.
@@ -172,9 +189,9 @@ requirements:
         status: active
         description: >
           For every run of slice open that exits non-zero, no time entry it
-          started still exists, any timer it stopped is running again, no
-          manifest exists for the slice, and the ticket's status is what it
-          was before the run.
+          created still exists, every entry that existed before is still
+          there and running or stopped as it was, no manifest exists for the
+          slice, and the ticket's status is what it was before the run.
 
   - id: SLICE-3
     title: Slice Pause
@@ -270,9 +287,8 @@ requirements:
         description: >
           Given an active slice and no running Harvest timer,
           when slice resume is run,
-          then a timer for the slice's ticket is running with the slice id in
-          its notes, on the slice's own entry when Harvest allows it and on a
-          new entry today otherwise, the ticket, branch, worktree, and
+          then the slice ticket's entry for today is running, restarted if
+          it exists and started otherwise, the ticket, branch, worktree, and
           manifest are unchanged, and it exits zero.
 
       - id: SLICE-4-2
@@ -316,8 +332,8 @@ requirements:
     title: Slice Close
     description: >
       Running slice close ends the active slice: its timer is stopped, the
-      ticket gets a closing comment and moves to review (or done), the
-      manifest is marked closed, and no slice is active afterward. The
+      ticket moves to review (or done), the manifest is marked closed, and
+      no slice is active afterward. The
       branch and worktree are left for review and merge.
     status: draft
     interface: src/ports.rs
@@ -328,14 +344,15 @@ requirements:
     rationale: >
       Close is the last housekeeping step of the lifecycle. Merging stays
       a human action, so close only records that the work is ready and
-      frees the one-active-slice slot. The comment is the only step that
-      cannot be undone, so it runs last: if anything fails before it, the
-      earlier steps are undone and the ticket shows no sign of the attempt.
+      frees the one-active-slice slot. Close posts no comment: slice ids are
+      internal, and there is nothing yet worth telling the ticket's readers
+      that the status change does not. Every step can therefore be undone.
     superseded_by:
     out_of_scope:
       - Merging, pushing, or opening a merge request
       - Removing the branch or worktree
       - Logging decisions
+      - Commenting on the ticket
       - Closing a slice that is not the active one
       - Slack focus status
     acceptance_criteria:
@@ -345,9 +362,8 @@ requirements:
         description: >
           Given an active slice for ticket T,
           when slice close is run,
-          then the slice's timer is not running, ticket T has a comment
-          naming the slice id and branch, T is in its configured review
-          status, the manifest's status is closed, no slice is active,
+          then the slice's timer is not running, T is in its configured
+          review status, the manifest's status is closed, no slice is active,
           the branch and worktree still exist, and it exits zero.
 
       - id: SLICE-5-2
@@ -394,8 +410,8 @@ requirements:
           Given a step of slice close fails after an earlier step succeeded,
           when slice close is run,
           then it undoes the earlier steps it performed in reverse order,
-          including restarting a timer it stopped, posts no comment,
-          reports which step failed, and exits non-zero.
+          including restarting a timer it stopped, reports which step
+          failed, and exits non-zero.
 
     invariants:
       - id: SLICE-5-I1
@@ -404,5 +420,4 @@ requirements:
         description: >
           For every run of slice close that exits non-zero, the slice is
           still active, its timer's running state, the ticket's status, and
-          the manifest are what they were before the run, and no comment
-          was posted.
+          the manifest are what they were before the run.
