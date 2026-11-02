@@ -142,7 +142,8 @@ requirements:
         description: >
           Given a step of slice open fails after an earlier step succeeded,
           when slice open is run,
-          then it undoes the earlier steps it performed, reports which step
+          then it undoes the earlier steps it performed in reverse order,
+          including restarting any timer it stopped, reports which step
           failed, and exits non-zero.
 
     invariants:
@@ -157,6 +158,7 @@ requirements:
         title: Failed Open Leaves No Trace
         status: draft
         description: >
-          For every run of slice open that exits non-zero, no timer it started
-          is still running, no manifest exists for the slice, and the ticket's
-          status is what it was before the run.
+          For every run of slice open that exits non-zero, no time entry it
+          started still exists, any timer it stopped is running again, no
+          manifest exists for the slice, and the ticket's status is what it
+          was before the run.
