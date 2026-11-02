@@ -86,17 +86,26 @@ requirements:
       day: every slice of ticket T on a given day logs to T's one entry for
       that day, the most recently updated entry dated today whose notes name
       T. A branch belongs to a feature, the ticket, and a slice is one step
-      of it: every slice of T works on T's one branch and worktree, named
-      for T alone. Slice ids are internal to slice and never appear in
-      Harvest notes, on tickets, or in branch names; commits made during a
-      slice carry its id in their message, by convention rather than by
-      anything slice enforces.
+      of it: every slice of T works on T's one branch and worktree. The
+      branch is named <type>/<yyyymmdd>-<T>-<short title>, for example
+      feature/20261102-TBOARD-405-dashboard: the type is chosen by the
+      caller, who infers it from the ticket's content; the date is the day
+      the branch is created; T stays uppercase so cu and mon can read the
+      ticket from the branch; the short title is the ticket title lowercased
+      with words joined by hyphens, cut to about 40 characters. T's branch is
+      the one whose name has that shape with T after the date. Slice ids are
+      internal to slice and never appear in Harvest notes, on tickets, or in
+      branch names; commits made during a slice carry its id in their
+      message, by convention rather than by anything slice enforces.
+      Manifests are internal too, and live in slice's local state rather
+      than in the worktree, so they cannot be committed by accident.
     superseded_by:
     out_of_scope:
       - Pausing, resuming, or closing slices
       - Spec authoring and approval
       - Launching test or implementation agents
       - Choosing which ticket to work on
+      - Inferring the branch type from the ticket; the caller passes it
       - Slack focus status
     acceptance_criteria:
       - id: SLICE-2-1
@@ -107,8 +116,8 @@ requirements:
           entry for T today,
           when slice open is run with a valid ticket number T,
           then a new Harvest entry for T is running, noted with T and the
-          ticket's title only, ticket T is in progress, a branch named for T without the slice id
-          exists with its worktree,
+          ticket's title only, ticket T is in progress, a branch named from the --type given,
+          today's date, T, and the ticket's title exists with its worktree,
           a slice manifest records T and the base commit,
           and the slice is active.
 
@@ -164,13 +173,42 @@ requirements:
         title: Ticket Branch Exists
         status: draft
         description: >
-          Given no active slice and an existing branch for T from an earlier
-          slice, with or without its worktree,
-          when slice open is run with T,
+          Given no active slice and exactly one existing branch for T, from
+          an earlier slice, with or without its worktree,
+          when slice open is run with T, and with no --type or the branch's
+          own type,
           then the slice uses that branch, its worktree exists, creating it
           if missing, no other branch is created, the manifest's base commit
           is the branch's head, and the open otherwise completes as in
           SLICE-2-1.
+
+      - id: SLICE-2-10
+        title: Branch Options Conflict
+        status: draft
+        description: >
+          Given an existing branch for T,
+          when slice open is run with T and --base, or with a --type other
+          than the branch's type,
+          then it fails, names the existing branch, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-2-11
+        title: Type Required For New Branch
+        status: draft
+        description: >
+          Given no existing branch for T,
+          when slice open is run with T and no --type,
+          then it fails saying a type is needed to name the branch,
+          changes nothing, and exits non-zero.
+
+      - id: SLICE-2-12
+        title: Ambiguous Ticket Branch
+        status: draft
+        description: >
+          Given more than one existing branch for T,
+          when slice open is run with T,
+          then it fails, names every such branch, changes nothing,
+          and exits non-zero.
 
       - id: SLICE-2-8
         title: Ticket Already Tracked Today
