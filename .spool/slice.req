@@ -175,3 +175,234 @@ requirements:
           started still exists, any timer it stopped is running again, no
           manifest exists for the slice, and the ticket's status is what it
           was before the run.
+
+  - id: SLICE-3
+    title: Slice Pause
+    description: >
+      Running slice pause stops the active slice's timer when you switch
+      away, leaving the slice, its ticket, branch, worktree, and manifest
+      as they are so it can be resumed later.
+    status: draft
+    interface: src/ports.rs
+    deciders:
+      - Matty
+    consulted: []
+    date: 2026-11-02
+    rationale: >
+      Pausing through slice rather than hv keeps the timer owned by the
+      slice, so a later resume restarts the same entry and the one-timer
+      rule holds. Pausing is the command run most often, so it must be
+      idempotent and refuse rather than guess when state is inconsistent.
+    superseded_by:
+    out_of_scope:
+      - Pausing automatically when a session ends
+      - Slack focus status
+    acceptance_criteria:
+      - id: SLICE-3-1
+        title: Pause Running Slice
+        status: draft
+        description: >
+          Given an active slice whose timer is running,
+          when slice pause is run,
+          then the timer is stopped, the slice is still active, the ticket,
+          branch, worktree, and manifest are unchanged, and it exits zero.
+
+      - id: SLICE-3-2
+        title: Already Paused
+        status: draft
+        description: >
+          Given an active slice and no running Harvest timer,
+          when slice pause is run,
+          then it reports that the slice is already paused, changes nothing,
+          and exits zero.
+
+      - id: SLICE-3-3
+        title: Nothing To Pause
+        status: draft
+        description: >
+          Given no active slice,
+          when slice pause is run,
+          then it reports that no slice is active, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-3-4
+        title: Pause Mismatch
+        status: draft
+        description: >
+          Given an active slice and a running Harvest timer for a different
+          ticket or for no ticket,
+          when slice pause is run,
+          then it reports the mismatch with both values, changes nothing,
+          and exits non-zero.
+
+    invariants:
+      - id: SLICE-3-I1
+        title: Pause Never Starts Or Deletes
+        status: draft
+        description: >
+          For every starting state, slice pause starts no timer, deletes no
+          time entry, and leaves the ticket, local slice state, and manifest
+          unchanged.
+
+  - id: SLICE-4
+    title: Slice Resume
+    description: >
+      Running slice resume restarts the paused active slice's timer, without
+      needing the ticket number.
+    status: draft
+    interface: src/ports.rs
+    deciders:
+      - Matty
+    consulted: []
+    date: 2026-11-02
+    rationale: >
+      SLICE-2-7 already resumes a paused slice when it is opened again by
+      ticket number. Resume is the same operation addressed to whatever slice
+      is active, which is what you want after a break without having to
+      remember the ticket.
+    superseded_by:
+    out_of_scope:
+      - Resuming a slice other than the active one
+    acceptance_criteria:
+      - id: SLICE-4-1
+        title: Resume Paused Slice
+        status: draft
+        description: >
+          Given an active slice and no running Harvest timer,
+          when slice resume is run,
+          then a timer for the slice's ticket is running with the slice id in
+          its notes, on the slice's own entry when Harvest allows it and on a
+          new entry today otherwise, the ticket, branch, worktree, and
+          manifest are unchanged, and it exits zero.
+
+      - id: SLICE-4-2
+        title: Already Running
+        status: draft
+        description: >
+          Given an active slice whose timer is running,
+          when slice resume is run,
+          then it reports that the slice is already running, changes nothing,
+          and exits zero.
+
+      - id: SLICE-4-3
+        title: Nothing To Resume
+        status: draft
+        description: >
+          Given no active slice,
+          when slice resume is run,
+          then it reports that no slice is active, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-4-4
+        title: Resume Mismatch
+        status: draft
+        description: >
+          Given an active slice and a running Harvest timer for a different
+          ticket or for no ticket,
+          when slice resume is run,
+          then it reports the mismatch with both values, changes nothing,
+          and exits non-zero.
+
+    invariants:
+      - id: SLICE-4-I1
+        title: Resume Keeps One Timer
+        status: draft
+        description: >
+          For every starting state and every outcome of slice resume, at most
+          one Harvest timer is running afterward, and no time entry is
+          deleted.
+
+  - id: SLICE-5
+    title: Slice Close
+    description: >
+      Running slice close ends the active slice: its timer is stopped, the
+      ticket gets a closing comment and moves to review (or done), the
+      manifest is marked closed, and no slice is active afterward. The
+      branch and worktree are left for review and merge.
+    status: draft
+    interface: src/ports.rs
+    deciders:
+      - Matty
+    consulted: []
+    date: 2026-11-02
+    rationale: >
+      Close is the last housekeeping step of the lifecycle. Merging stays
+      a human action, so close only records that the work is ready and
+      frees the one-active-slice slot. The comment is the only step that
+      cannot be undone, so it runs last: if anything fails before it, the
+      earlier steps are undone and the ticket shows no sign of the attempt.
+    superseded_by:
+    out_of_scope:
+      - Merging, pushing, or opening a merge request
+      - Removing the branch or worktree
+      - Logging decisions
+      - Closing a slice that is not the active one
+      - Slack focus status
+    acceptance_criteria:
+      - id: SLICE-5-1
+        title: Close To Review
+        status: draft
+        description: >
+          Given an active slice for ticket T,
+          when slice close is run,
+          then the slice's timer is not running, ticket T has a comment
+          naming the slice id and branch, T is in its configured review
+          status, the manifest's status is closed, no slice is active,
+          the branch and worktree still exist, and it exits zero.
+
+      - id: SLICE-5-2
+        title: Close To Done
+        status: draft
+        description: >
+          Given an active slice for ticket T,
+          when slice close is run with --done,
+          then it completes as in SLICE-5-1 except that T is in its
+          configured done status.
+
+      - id: SLICE-5-3
+        title: Close Paused Slice
+        status: draft
+        description: >
+          Given an active slice and no running Harvest timer,
+          when slice close is run,
+          then it completes as in SLICE-5-1 without starting or stopping
+          any timer.
+
+      - id: SLICE-5-4
+        title: Nothing To Close
+        status: draft
+        description: >
+          Given no active slice,
+          when slice close is run,
+          then it reports that no slice is active, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-5-5
+        title: Close Mismatch
+        status: draft
+        description: >
+          Given an active slice and a running Harvest timer for a different
+          ticket or for no ticket,
+          when slice close is run,
+          then it reports the mismatch with both values, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-5-6
+        title: Close Partial Failure
+        status: draft
+        description: >
+          Given a step of slice close fails after an earlier step succeeded,
+          when slice close is run,
+          then it undoes the earlier steps it performed in reverse order,
+          including restarting a timer it stopped, posts no comment,
+          reports which step failed, and exits non-zero.
+
+    invariants:
+      - id: SLICE-5-I1
+        title: Failed Close Leaves No Trace
+        status: draft
+        description: >
+          For every run of slice close that exits non-zero, the slice is
+          still active, its timer's running state, the ticket's status, and
+          the manifest are what they were before the run, and no comment
+          was posted.
