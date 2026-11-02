@@ -67,21 +67,78 @@ pub struct BranchName {
 impl BranchName {
     /// Name the branch for a new slice of `ticket` created on `date`.
     pub fn new(branch_type: &BranchType, date: &str, ticket: &Ticket) -> BranchName {
-        let _ = (branch_type, date, ticket);
-        todo!()
+        BranchName {
+            branch_type: branch_type.clone(),
+            date: date.to_string(),
+            ticket: ticket.reference.clone(),
+            short_title: short_title(&ticket.title),
+        }
     }
 
     /// Parse a branch name; `None` unless it has the ticket-branch shape.
     pub fn parse(name: &str) -> Option<BranchName> {
-        let _ = name;
-        todo!()
+        let (branch_type, rest) = name.split_once('/')?;
+        if branch_type.is_empty() || !branch_type.bytes().all(|b| b.is_ascii_lowercase()) || rest.contains('/') {
+            return None;
+        }
+        let (date, rest) = rest.split_at_checked(8)?;
+        let rest = rest.strip_prefix('-')?;
+        if !date.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // <PREFIX>-<digits>, then optionally -<short title>.
+        let (prefix, rest) = rest.split_once('-')?;
+        let mut chars = prefix.bytes();
+        if !chars.next().is_some_and(|b| b.is_ascii_uppercase())
+            || !chars.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            return None;
+        }
+        let (number, short_title) = rest.split_once('-').unwrap_or((rest, ""));
+        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(BranchName {
+            branch_type: BranchType(branch_type.to_string()),
+            date: date.to_string(),
+            ticket: TicketRef(format!("{prefix}-{number}")),
+            short_title: short_title.to_string(),
+        })
     }
+}
+
+/// The ticket title lowercased, with runs of anything but ASCII letters and
+/// digits turned into single hyphens, cut at a word to at most 40 characters.
+fn short_title(title: &str) -> String {
+    const MAX: usize = 40;
+    let lowered = title.to_lowercase();
+    let words = lowered
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty());
+    let mut out = String::new();
+    for word in words {
+        let extra = if out.is_empty() { word.len() } else { word.len() + 1 };
+        if out.len() + extra > MAX {
+            if out.is_empty() {
+                out.push_str(&word[..MAX]);
+            }
+            break;
+        }
+        if !out.is_empty() {
+            out.push('-');
+        }
+        out.push_str(word);
+    }
+    out
 }
 
 impl fmt::Display for BranchName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
+        write!(f, "{}/{}-{}", self.branch_type.0, self.date, self.ticket.0)?;
+        if !self.short_title.is_empty() {
+            write!(f, "-{}", self.short_title)?;
+        }
+        Ok(())
     }
 }
 
@@ -403,8 +460,259 @@ pub enum OpenOutcome {
 /// ticket's entry for today, set it in progress, use or create its branch and
 /// worktree, write the manifest and record the slice as active.
 pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceError> {
-    let _ = (deps, request);
-    todo!()
+    let preflight = |e| failed(Step::Preflight, e);
+
+    // Reads first: nothing below changes anything until every check passes.
+    let report = status(deps).map_err(preflight)?;
+    if let Some(slice) = &report.active {
+        return reopen(deps, request, slice, &report);
+    }
+    let ticket = match deps.tickets.fetch(&request.ticket) {
+        Ok(Some(ticket)) => ticket,
+        Ok(None) => return Err(SliceError::UnknownTicket(request.ticket.clone())),
+        Err(e) => return Err(failed(Step::ResolveTicket, e)),
+    };
+
+    let mut existing: Vec<String> = deps
+        .vcs
+        .branches(&request.repo)
+        .map_err(preflight)?
+        .into_iter()
+        .filter(|b| BranchName::parse(b).is_some_and(|n| n.ticket == ticket.reference))
+        .collect();
+    if existing.len() > 1 {
+        existing.sort();
+        return Err(SliceError::AmbiguousBranch(existing));
+    }
+    let worktree_root = worktree_root(deps.settings, &request.repo);
+    // (branch, worktree, base commit, how to make the worktree)
+    let (branch, worktree, base_commit, checkout) = match existing.pop() {
+        Some(branch) => {
+            let parsed = BranchName::parse(&branch).expect("filtered on parse");
+            let type_differs = request.branch_type.as_ref().is_some_and(|t| *t != parsed.branch_type);
+            if request.base.is_some() || type_differs {
+                return Err(SliceError::BranchOptionsConflict { branch });
+            }
+            let base_commit = deps.vcs.resolve(&request.repo, &branch).map_err(preflight)?;
+            match deps.vcs.worktree_of(&request.repo, &branch).map_err(preflight)? {
+                Some(path) => (branch, path, base_commit, Checkout::Existing),
+                None => {
+                    let path = worktree_root.join(branch.replace('/', "-"));
+                    (branch, path, base_commit, Checkout::AddWorktree)
+                }
+            }
+        }
+        None => {
+            let Some(branch_type) = &request.branch_type else {
+                return Err(SliceError::TypeRequired);
+            };
+            let branch = BranchName::new(branch_type, deps.today, &ticket).to_string();
+            let base = request.base.as_deref().unwrap_or("HEAD");
+            let base_commit = deps.vcs.resolve(&request.repo, base).map_err(preflight)?;
+            let path = worktree_root.join(branch.replace('/', "-"));
+            (branch, path, base_commit, Checkout::CreateBranch)
+        }
+    };
+    let id = deps.state.next_slice_id(&ticket.reference).map_err(preflight)?;
+    let entry = deps.timer.entry_today(&ticket.reference).map_err(preflight)?;
+    let in_progress = deps.settings.in_progress.for_system(ticket.system);
+
+    let mut undo = Undo::default();
+    let result = (|| {
+        if let Some(stray) = &report.timer {
+            deps.timer.stop(stray.id).map_err(|e| (Step::StopStrayTimer, e))?;
+            undo.push(Step::StopStrayTimer, Action::Restart(stray.id));
+        }
+
+        run_entry(deps, &ticket, entry, &mut undo).map_err(|e| (Step::StartTimer, e))?;
+
+        deps.tickets
+            .set_status(&ticket.reference, in_progress)
+            .map_err(|e| (Step::SetInProgress, e))?;
+        undo.push(
+            Step::SetInProgress,
+            Action::SetStatus(ticket.reference.clone(), ticket.status.clone()),
+        );
+
+        match checkout {
+            Checkout::Existing => {}
+            Checkout::AddWorktree => {
+                deps.vcs
+                    .add_worktree(&request.repo, &branch, &worktree)
+                    .map_err(|e| (Step::CreateWorktree, e))?;
+                undo.push(
+                    Step::CreateWorktree,
+                    Action::RemoveWorktree(request.repo.clone(), worktree.clone()),
+                );
+            }
+            Checkout::CreateBranch => {
+                deps.vcs
+                    .create_branch(&request.repo, &branch, &worktree, &base_commit)
+                    .map_err(|e| (Step::CreateWorktree, e))?;
+                undo.push(
+                    Step::CreateWorktree,
+                    Action::RemoveBranch(request.repo.clone(), branch.clone(), worktree.clone()),
+                );
+            }
+        }
+
+        let manifest = Manifest {
+            id: id.clone(),
+            ticket: ticket.reference.clone(),
+            ticket_system: ticket.system,
+            branch: branch.clone(),
+            base_commit: base_commit.clone(),
+            status: ManifestStatus::Open,
+            acceptance_criteria: Vec::new(),
+            invariants: Vec::new(),
+            spec_hash: None,
+            test_hash: None,
+            budgets: Vec::new(),
+        };
+        deps.state
+            .write_manifest(&manifest)
+            .map_err(|e| (Step::WriteManifest, e))?;
+        undo.push(Step::WriteManifest, Action::RemoveManifest(id.clone()));
+
+        let slice = ActiveSlice {
+            id: id.clone(),
+            ticket: ticket.reference.clone(),
+            repo: request.repo.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+        };
+        deps.state.set_active(&slice).map_err(|e| (Step::SetActive, e))?;
+        Ok(slice)
+    })();
+
+    match result {
+        Ok(slice) => Ok(OpenOutcome::Opened(slice)),
+        Err((step, error)) => Err(SliceError::StepFailed {
+            step,
+            error,
+            undo_failures: undo.unwind(deps),
+        }),
+    }
+}
+
+/// How open gets a worktree for the slice's branch.
+enum Checkout {
+    /// The branch is already checked out in a worktree.
+    Existing,
+    /// The branch exists; check it out in a new worktree.
+    AddWorktree,
+    /// Create the branch and its worktree.
+    CreateBranch,
+}
+
+/// Open for a ticket while a slice is active: the same ticket's slice is
+/// already open (SLICE-2-4) or paused and resumed (SLICE-2-7); a different
+/// ticket's slice blocks the open (SLICE-2-3).
+fn reopen(
+    deps: &Deps,
+    request: &OpenRequest,
+    slice: &ActiveSlice,
+    report: &StatusReport,
+) -> Result<OpenOutcome, SliceError> {
+    if slice.ticket != request.ticket {
+        return Err(SliceError::AnotherSliceActive(Box::new(slice.clone())));
+    }
+    match resume_active(deps, slice, report)? {
+        ResumeOutcome::Resumed(slice) => Ok(OpenOutcome::Resumed(slice)),
+        ResumeOutcome::AlreadyRunning(slice) => Ok(OpenOutcome::AlreadyOpen(slice)),
+    }
+}
+
+/// Run the ticket's entry for today: restart it if there is one, start one
+/// otherwise, pushing the matching undo.
+fn run_entry(deps: &Deps, ticket: &Ticket, entry: Option<TimerId>, undo: &mut Undo) -> PortResult<()> {
+    match entry {
+        Some(id) => {
+            deps.timer.restart(id)?;
+            undo.push(Step::StartTimer, Action::Stop(id));
+        }
+        None => {
+            let id = deps.timer.start(ticket)?;
+            undo.push(Step::StartTimer, Action::Delete(id));
+        }
+    }
+    Ok(())
+}
+
+fn failed(step: Step, error: PortError) -> SliceError {
+    SliceError::StepFailed {
+        step,
+        error,
+        undo_failures: Vec::new(),
+    }
+}
+
+/// The active slice from a status report, refusing when there is none or the
+/// running timer does not match it.
+fn active_slice(deps: &Deps) -> Result<(ActiveSlice, StatusReport), SliceError> {
+    let report = status(deps).map_err(|e| failed(Step::Preflight, e))?;
+    let Some(slice) = report.active.clone() else {
+        return Err(SliceError::NoActiveSlice);
+    };
+    if report.mismatch.is_some() {
+        return Err(SliceError::Inconsistent(Box::new(report)));
+    }
+    Ok((slice, report))
+}
+
+/// `<repo>/../<repo name>.slices/` unless configured.
+fn worktree_root(settings: &Settings, repo: &Path) -> PathBuf {
+    if let Some(root) = &settings.worktree_root {
+        return root.clone();
+    }
+    let name = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    repo.parent().unwrap_or(repo).join(format!("{name}.slices"))
+}
+
+/// The compensating action for a completed step.
+enum Action {
+    Restart(TimerId),
+    Stop(TimerId),
+    Delete(TimerId),
+    SetStatus(TicketRef, String),
+    RemoveWorktree(PathBuf, PathBuf),
+    RemoveBranch(PathBuf, String, PathBuf),
+    RemoveManifest(SliceId),
+    WriteManifest(Box<Manifest>),
+}
+
+#[derive(Default)]
+struct Undo(Vec<(Step, Action)>);
+
+impl Undo {
+    fn push(&mut self, step: Step, action: Action) {
+        self.0.push((step, action));
+    }
+
+    /// Run every compensating action in reverse order, continuing past
+    /// failures, and return the ones that failed.
+    fn unwind(self, deps: &Deps) -> Vec<(Step, PortError)> {
+        let mut failures = Vec::new();
+        for (step, action) in self.0.into_iter().rev() {
+            let result = match action {
+                Action::Restart(id) => deps.timer.restart(id),
+                Action::Stop(id) => deps.timer.stop(id),
+                Action::Delete(id) => deps.timer.delete(id),
+                Action::SetStatus(r, status) => deps.tickets.set_status(&r, &status),
+                Action::RemoveWorktree(repo, path) => deps.vcs.remove_worktree(&repo, &path),
+                Action::RemoveBranch(repo, branch, path) => deps.vcs.remove_branch(&repo, &branch, &path),
+                Action::RemoveManifest(id) => deps.state.remove_manifest(&id),
+                Action::WriteManifest(manifest) => deps.state.write_manifest(&manifest),
+            };
+            if let Err(e) = result {
+                failures.push((step, e));
+            }
+        }
+        failures
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -419,8 +727,12 @@ pub enum PauseOutcome {
 
 /// Stop the active slice's timer; nothing else changes.
 pub fn pause(deps: &Deps) -> Result<PauseOutcome, SliceError> {
-    let _ = deps;
-    todo!()
+    let (slice, report) = active_slice(deps)?;
+    let Some(timer) = &report.timer else {
+        return Ok(PauseOutcome::AlreadyPaused(slice));
+    };
+    deps.timer.stop(timer.id).map_err(|e| failed(Step::StopTimer, e))?;
+    Ok(PauseOutcome::Paused(slice))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -432,8 +744,28 @@ pub enum ResumeOutcome {
 /// Run the active slice's ticket's entry for today, restarting it or
 /// starting one.
 pub fn resume(deps: &Deps) -> Result<ResumeOutcome, SliceError> {
-    let _ = deps;
-    todo!()
+    let (slice, report) = active_slice(deps)?;
+    resume_active(deps, &slice, &report)
+}
+
+/// Resume `slice`, which is active, given the status report that found it.
+fn resume_active(deps: &Deps, slice: &ActiveSlice, report: &StatusReport) -> Result<ResumeOutcome, SliceError> {
+    if report.mismatch.is_some() {
+        return Err(SliceError::Inconsistent(Box::new(report.clone())));
+    }
+    if report.timer.is_some() {
+        return Ok(ResumeOutcome::AlreadyRunning(slice.clone()));
+    }
+    let Some(ticket) = &report.ticket else {
+        return Err(SliceError::UnknownTicket(slice.ticket.clone()));
+    };
+    let entry = deps
+        .timer
+        .entry_today(&ticket.reference)
+        .map_err(|e| failed(Step::Preflight, e))?;
+    // A single write: nothing earlier to undo if it fails.
+    run_entry(deps, ticket, entry, &mut Undo::default()).map_err(|e| failed(Step::StartTimer, e))?;
+    Ok(ResumeOutcome::Resumed(slice.clone()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -446,6 +778,60 @@ pub struct CloseRequest {
 /// closed and clear the active slice. The branch and worktree stay. Returns
 /// the slice that was closed.
 pub fn close(deps: &Deps, request: &CloseRequest) -> Result<ActiveSlice, SliceError> {
-    let _ = (deps, request);
-    todo!()
+    let (slice, report) = active_slice(deps)?;
+    let Some(ticket) = &report.ticket else {
+        return Err(SliceError::UnknownTicket(slice.ticket.clone()));
+    };
+    let manifest = match deps.state.read_manifest(&slice.id) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            let error = PortError {
+                source: Source::LocalState,
+                message: format!("no manifest for slice {}", slice.id.0),
+            };
+            return Err(failed(Step::Preflight, error));
+        }
+        Err(e) => return Err(failed(Step::Preflight, e)),
+    };
+    let statuses = if request.done {
+        &deps.settings.done
+    } else {
+        &deps.settings.review
+    };
+
+    let mut undo = Undo::default();
+    let result = (|| {
+        if let Some(timer) = &report.timer {
+            deps.timer.stop(timer.id).map_err(|e| (Step::StopTimer, e))?;
+            undo.push(Step::StopTimer, Action::Restart(timer.id));
+        }
+
+        deps.tickets
+            .set_status(&ticket.reference, statuses.for_system(ticket.system))
+            .map_err(|e| (Step::SetClosedStatus, e))?;
+        undo.push(
+            Step::SetClosedStatus,
+            Action::SetStatus(ticket.reference.clone(), ticket.status.clone()),
+        );
+
+        let closed = Manifest {
+            status: ManifestStatus::Closed,
+            ..manifest.clone()
+        };
+        deps.state
+            .write_manifest(&closed)
+            .map_err(|e| (Step::CloseManifest, e))?;
+        undo.push(Step::CloseManifest, Action::WriteManifest(Box::new(manifest.clone())));
+
+        deps.state.clear_active().map_err(|e| (Step::ClearActive, e))
+    })();
+
+    match result {
+        Ok(()) => Ok(slice),
+        Err((step, error)) => Err(SliceError::StepFailed {
+            step,
+            error,
+            undo_failures: undo.unwind(deps),
+        }),
+    }
 }
