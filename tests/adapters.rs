@@ -67,7 +67,7 @@ fn manifest() -> Manifest {
 const BRANCH: &str = "feature/20261102-ENG-1-login";
 
 fn branch_exists(repo: &Path, branch: &str) -> bool {
-    git(repo, &["branch", "--list", branch]) != ""
+    !git(repo, &["branch", "--list", branch]).is_empty()
 }
 
 #[test]
