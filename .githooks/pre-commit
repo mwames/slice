@@ -1,0 +1,8 @@
+#!/bin/sh
+# A commit may change src/ or tests/, not both: tests and implementation are
+# written and reviewed separately.
+staged=$(git diff --cached --name-only)
+if echo "$staged" | grep -q '^src/' && echo "$staged" | grep -q '^tests/'; then
+	echo "pre-commit: this commit touches both src/ and tests/; split it." >&2
+	exit 1
+fi
