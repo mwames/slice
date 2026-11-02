@@ -89,6 +89,36 @@ fn git_resolves_and_creates_and_removes_a_worktree() {
     assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "");
 }
 
+/// Found in a live run: `git worktree add -b` creates the branch before it
+/// notices the path exists, and a failed step is not undone by open, so the
+/// adapter must not leave a branch behind.
+#[test]
+fn git_failed_worktree_leaves_no_branch() {
+    let repo = repo("blocked");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let worktree = repo.parent().unwrap().join("app.slices/ENG-1-1");
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join("file"), "in the way").unwrap();
+
+    let err = Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head).unwrap_err();
+
+    assert_eq!(err.source, Source::Git);
+    assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "", "no branch left behind");
+}
+
+/// The cleanup above must never delete a branch that existed before.
+#[test]
+fn git_failed_worktree_keeps_existing_branch() {
+    let repo = repo("existing");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", "slice/ENG-1-1"]);
+    let worktree = repo.parent().unwrap().join("app.slices/ENG-1-1");
+
+    Git.create_worktree(&repo, "slice/ENG-1-1", &worktree, &head).unwrap_err();
+
+    assert_eq!(git(&repo, &["branch", "--list", "slice/ENG-1-1"]), "slice/ENG-1-1");
+}
+
 #[test]
 fn git_toplevel_from_subdirectory() {
     let repo = repo("toplevel");
