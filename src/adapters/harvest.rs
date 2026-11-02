@@ -2,7 +2,7 @@
 
 use std::cell::OnceCell;
 
-use harvest::{Client, System, TimeEntry};
+use harvest::{Client, Date, EntryQuery, StartInput, System, TimeEntry};
 
 use crate::ports::{PortError, PortResult, Source, Ticket, TicketRef, TimeTracker, Timer, TimerId};
 
@@ -62,13 +62,30 @@ impl TimeTracker for Harvest {
     }
 
     fn entry_today(&self, ticket: &TicketRef) -> PortResult<Option<TimerId>> {
-        let _ = ticket;
-        todo!()
+        let client = self.client()?;
+        let today = Date::today();
+        let query = EntryQuery {
+            from: today,
+            to: today,
+            ..EntryQuery::default()
+        };
+        let entries = client.entries(&query).map_err(err)?;
+        Ok(entries
+            .iter()
+            .filter(|e| self.timer(client, e).ticket.as_ref() == Some(ticket))
+            .max_by_key(|e| e.updated_at)
+            .map(|e| TimerId(e.id)))
     }
 
     fn start(&self, ticket: &Ticket) -> PortResult<TimerId> {
-        let _ = ticket;
-        todo!()
+        let client = self.client()?;
+        let target = client.resolve_target(&self.project, &self.task).map_err(err)?;
+        let input = StartInput {
+            target,
+            notes: format!("{} - {}", ticket.reference.0, ticket.title),
+            ..StartInput::default()
+        };
+        client.start_timer(&input).map(|e| TimerId(e.id)).map_err(err)
     }
 
     fn stop(&self, id: TimerId) -> PortResult<()> {
@@ -76,8 +93,7 @@ impl TimeTracker for Harvest {
     }
 
     fn restart(&self, id: TimerId) -> PortResult<()> {
-        let _ = id;
-        todo!()
+        self.client()?.restart_timer(id.0).map(|_| ()).map_err(err)
     }
 
     fn delete(&self, id: TimerId) -> PortResult<()> {

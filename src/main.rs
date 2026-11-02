@@ -8,7 +8,10 @@ use slice::ports::*;
 
 const USAGE: &str = "usage:
   slice status [--json]
-  slice open <TICKET> [--type TYPE] [--repo PATH] [--base REF] [--json]";
+  slice open <TICKET> [--type TYPE] [--repo PATH] [--base REF] [--json]
+  slice pause [--json]
+  slice resume [--json]
+  slice close [--done] [--json]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -26,6 +29,7 @@ struct Flags {
     repo: Option<PathBuf>,
     base: Option<String>,
     branch_type: Option<String>,
+    done: bool,
     positional: Vec<String>,
 }
 
@@ -35,6 +39,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
         repo: None,
         base: None,
         branch_type: None,
+        done: false,
         positional: Vec::new(),
     };
     let mut it = args.iter();
@@ -42,6 +47,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
         let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} needs a value"));
         match arg.as_str() {
             "--json" => flags.json = true,
+            "--done" => flags.done = true,
             "--repo" => flags.repo = Some(PathBuf::from(value("--repo")?)),
             "--base" => flags.base = Some(value("--base")?),
             "--type" => flags.branch_type = Some(value("--type")?),
@@ -99,7 +105,47 @@ fn run(args: &[String]) -> Result<u8, String> {
                 branch_type: flags.branch_type.map(|t| BranchType(t.trim().to_lowercase())),
                 base: flags.base,
             };
-            Ok(print_open(open(&deps, &request), flags.json))
+            Ok(print_result(open(&deps, &request), flags.json, |o| match o {
+                OpenOutcome::Opened(s) => (
+                    "opened",
+                    format!(
+                        "opened {} on branch {}\n  worktree {}",
+                        s.id.0,
+                        s.branch,
+                        s.worktree.display()
+                    ),
+                    s,
+                ),
+                OpenOutcome::AlreadyOpen(s) => ("already_open", format!("{} is already open", s.id.0), s),
+                OpenOutcome::Resumed(s) => (
+                    "resumed",
+                    format!("{} was paused; its timer is running again", s.id.0),
+                    s,
+                ),
+            }))
+        }
+        "pause" | "resume" | "close" if !flags.positional.is_empty() => Err(USAGE.to_string()),
+        "pause" => Ok(print_result(pause(&deps), flags.json, |o| match o {
+            PauseOutcome::Paused(s) => ("paused", format!("paused {}", s.id.0), s),
+            PauseOutcome::AlreadyPaused(s) => ("already_paused", format!("{} is already paused", s.id.0), s),
+        })),
+        "resume" => Ok(print_result(resume(&deps), flags.json, |o| match o {
+            ResumeOutcome::Resumed(s) => ("resumed", format!("resumed {}", s.id.0), s),
+            ResumeOutcome::AlreadyRunning(s) => ("already_running", format!("{} is already running", s.id.0), s),
+        })),
+        "close" => {
+            let done = flags.done;
+            Ok(print_result(close(&deps, &CloseRequest { done }), flags.json, |s| {
+                let to = if done { "done" } else { "review" };
+                (
+                    "closed",
+                    format!(
+                        "closed {}; {} moved to {to}; branch {} kept",
+                        s.id.0, s.ticket.0, s.branch
+                    ),
+                    s,
+                )
+            }))
         }
         other => Err(format!("unknown command {other}\n{USAGE}")),
     }
@@ -134,18 +180,7 @@ fn print_status(result: PortResult<StatusReport>, as_json: bool) -> u8 {
             return 1;
         }
     };
-    let mismatch = report.mismatch.as_ref().map(|m| match m {
-        Mismatch::DifferentTicket { slice, timer } => {
-            format!(
-                "the running timer is for {} but the active slice is for {}",
-                opt_ref(timer),
-                slice.0
-            )
-        }
-        Mismatch::TimerWithoutSlice { timer } => {
-            format!("a timer is running for {} with no active slice", opt_ref(timer))
-        }
-    });
+    let mismatch = report.mismatch.as_ref().map(mismatch_text);
     if as_json {
         let out = json!({
             "slice": report.active.as_ref().map(slice_json),
@@ -196,77 +231,89 @@ fn step_name(step: Step) -> &'static str {
     }
 }
 
-fn print_open(result: Result<OpenOutcome, SliceError>, as_json: bool) -> u8 {
-    let (code, message, value) = match &result {
-        Ok(OpenOutcome::Opened(s)) => (
-            0,
+fn mismatch_text(m: &Mismatch) -> String {
+    match m {
+        Mismatch::DifferentTicket { slice, timer } => {
             format!(
-                "opened {} on branch {}\n  worktree {}",
-                s.id.0,
-                s.branch,
-                s.worktree.display()
+                "the running timer is for {} but the active slice is for {}",
+                opt_ref(timer),
+                slice.0
+            )
+        }
+        Mismatch::TimerWithoutSlice { timer } => {
+            format!("a timer is running for {} with no active slice", opt_ref(timer))
+        }
+    }
+}
+
+fn describe_error(e: &SliceError) -> (String, Value) {
+    match e {
+        SliceError::NoActiveSlice => ("no slice is active".to_string(), json!({ "error": "no_active_slice" })),
+        SliceError::AnotherSliceActive(s) => (
+            format!(
+                "slice {} for {} is active; close it before opening another",
+                s.id.0, s.ticket.0
             ),
-            json!({ "outcome": "opened", "slice": slice_json(s) }),
+            json!({ "error": "another_slice_active", "slice": slice_json(s) }),
         ),
-        Ok(OpenOutcome::AlreadyOpen(s)) => (
-            0,
-            format!("{} is already open", s.id.0),
-            json!({ "outcome": "already_open", "slice": slice_json(s) }),
+        SliceError::UnknownTicket(r) => (
+            format!("no ticket {}", r.0),
+            json!({ "error": "unknown_ticket", "ticket": r.0 }),
         ),
-        Ok(OpenOutcome::Resumed(s)) => (
-            0,
-            format!("{} was already open; its timer restarted", s.id.0),
-            json!({ "outcome": "resumed", "slice": slice_json(s) }),
+        SliceError::Inconsistent(report) => {
+            let mismatch = report.mismatch.as_ref().map(mismatch_text).unwrap_or_default();
+            (
+                format!("{mismatch}; nothing changed"),
+                json!({ "error": "inconsistent", "mismatch": mismatch, "slice": report.active.as_ref().map(slice_json) }),
+            )
+        }
+        SliceError::BranchOptionsConflict { branch } => (
+            format!("{branch} already exists; --base and a different --type apply only to a new branch"),
+            json!({ "error": "branch_options_conflict", "branch": branch }),
         ),
+        SliceError::TypeRequired => (
+            "no branch exists for this ticket; pass --type to name one".to_string(),
+            json!({ "error": "type_required" }),
+        ),
+        SliceError::AmbiguousBranch(branches) => (
+            format!("more than one branch for this ticket: {}", branches.join(", ")),
+            json!({ "error": "ambiguous_branch", "branches": branches }),
+        ),
+        SliceError::StepFailed {
+            step,
+            error,
+            undo_failures,
+        } => {
+            let mut message = format!("{} failed: {error}; earlier steps undone", step_name(*step));
+            for (s, e) in undo_failures {
+                message.push_str(&format!("\n  could not undo {}: {e}", step_name(*s)));
+            }
+            let undo: Vec<Value> = undo_failures
+                .iter()
+                .map(|(s, e)| json!({ "step": step_name(*s), "error": error_json(e) }))
+                .collect();
+            (
+                message,
+                json!({ "error": "step_failed", "step": step_name(*step), "cause": error_json(error), "undo_failures": undo }),
+            )
+        }
+    }
+}
+
+/// Print an operation's result and return its exit code. `ok` gives the
+/// outcome's JSON name, its message, and the slice it concerns.
+fn print_result<T>(
+    result: Result<T, SliceError>,
+    as_json: bool,
+    ok: impl Fn(&T) -> (&'static str, String, &ActiveSlice),
+) -> u8 {
+    let (code, message, value) = match &result {
+        Ok(outcome) => {
+            let (name, message, slice) = ok(outcome);
+            (0, message, json!({ "outcome": name, "slice": slice_json(slice) }))
+        }
         Err(e) => {
-            let (message, value) = match e {
-                SliceError::AnotherSliceActive(s) => (
-                    format!(
-                        "slice {} for {} is active; close it before opening another",
-                        s.id.0, s.ticket.0
-                    ),
-                    json!({ "error": "another_slice_active", "slice": slice_json(s) }),
-                ),
-                SliceError::UnknownTicket(r) => (
-                    format!("no ticket {}", r.0),
-                    json!({ "error": "unknown_ticket", "ticket": r.0 }),
-                ),
-                SliceError::Inconsistent(report) => (
-                    "the running timer does not match the active slice; run `slice status`".to_string(),
-                    json!({ "error": "inconsistent", "slice": report.active.as_ref().map(slice_json) }),
-                ),
-                SliceError::NoActiveSlice => ("no slice is active".to_string(), json!({ "error": "no_active_slice" })),
-                SliceError::BranchOptionsConflict { branch } => (
-                    format!("{branch} already exists; --base and a different --type apply only to a new branch"),
-                    json!({ "error": "branch_options_conflict", "branch": branch }),
-                ),
-                SliceError::TypeRequired => (
-                    "no branch exists for this ticket; pass --type to name one".to_string(),
-                    json!({ "error": "type_required" }),
-                ),
-                SliceError::AmbiguousBranch(branches) => (
-                    format!("more than one branch for this ticket: {}", branches.join(", ")),
-                    json!({ "error": "ambiguous_branch", "branches": branches }),
-                ),
-                SliceError::StepFailed {
-                    step,
-                    error,
-                    undo_failures,
-                } => {
-                    let mut message = format!("{} failed: {error}; earlier steps undone", step_name(*step));
-                    for (s, e) in undo_failures {
-                        message.push_str(&format!("\n  could not undo {}: {e}", step_name(*s)));
-                    }
-                    let undo: Vec<Value> = undo_failures
-                        .iter()
-                        .map(|(s, e)| json!({ "step": step_name(*s), "error": error_json(e) }))
-                        .collect();
-                    (
-                        message,
-                        json!({ "error": "step_failed", "step": step_name(*step), "cause": error_json(error), "undo_failures": undo }),
-                    )
-                }
-            };
+            let (message, value) = describe_error(e);
             (e.exit_code() as u8, message, value)
         }
     };

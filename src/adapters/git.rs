@@ -59,23 +59,33 @@ impl Vcs for Git {
     }
 
     fn branches(&self, repo: &Path) -> PortResult<Vec<String>> {
-        let _ = repo;
-        todo!()
+        let out = git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"])?;
+        Ok(out.lines().map(str::to_string).collect())
     }
 
     fn worktree_of(&self, repo: &Path, branch: &str) -> PortResult<Option<PathBuf>> {
-        let _ = (repo, branch);
-        todo!()
+        // Porcelain output is blocks of "worktree <path>" ... "branch refs/heads/<name>".
+        let out = git(repo, &["worktree", "list", "--porcelain"])?;
+        let wanted = format!("branch refs/heads/{branch}");
+        let mut path = None;
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if line == wanted {
+                return Ok(path);
+            }
+        }
+        Ok(None)
     }
 
     fn add_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
-        let _ = (repo, branch, path);
-        todo!()
+        let path = path.to_string_lossy();
+        git(repo, &["worktree", "add", &path, branch]).map(|_| ())
     }
 
     fn remove_worktree(&self, repo: &Path, path: &Path) -> PortResult<()> {
-        let _ = (repo, path);
-        todo!()
+        let path = path.to_string_lossy();
+        git(repo, &["worktree", "remove", "--force", &path]).map(|_| ())
     }
 
     fn remove_branch(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
