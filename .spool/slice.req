@@ -347,6 +347,9 @@ requirements:
       frees the one-active-slice slot. Close posts no comment: slice ids are
       internal, and there is nothing yet worth telling the ticket's readers
       that the status change does not. Every step can therefore be undone.
+      Default statuses, overridable in config: review is "dev complete" in
+      ClickUp and "Waiting for review" in monday; done is "complete" in
+      ClickUp and "Done" in monday.
     superseded_by:
     out_of_scope:
       - Merging, pushing, or opening a merge request
