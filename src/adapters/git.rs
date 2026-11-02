@@ -47,7 +47,15 @@ impl Vcs for Git {
 
     fn create_worktree(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()> {
         let path = path.to_string_lossy();
-        git(repo, &["worktree", "add", "--no-track", "-b", branch, &path, base]).map(|_| ())
+        let branch_ref = format!("refs/heads/{branch}");
+        let existed = git(repo, &["rev-parse", "--verify", "--quiet", &branch_ref]).is_ok();
+        let result = git(repo, &["worktree", "add", "--no-track", "-b", branch, &path, base]).map(|_| ());
+        // `worktree add -b` creates the branch before checking the path, so a
+        // failure can leave a branch behind. Remove it unless it was already there.
+        if result.is_err() && !existed && git(repo, &["rev-parse", "--verify", "--quiet", &branch_ref]).is_ok() {
+            let _ = git(repo, &["branch", "-D", branch]);
+        }
+        result
     }
 
     fn remove_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
