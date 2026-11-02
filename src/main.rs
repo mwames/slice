@@ -8,7 +8,7 @@ use slice::ports::*;
 
 const USAGE: &str = "usage:
   slice status [--json]
-  slice open <TICKET> [--repo PATH] [--base REF] [--json]";
+  slice open <TICKET> [--type TYPE] [--repo PATH] [--base REF] [--json]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -25,6 +25,7 @@ struct Flags {
     json: bool,
     repo: Option<PathBuf>,
     base: Option<String>,
+    branch_type: Option<String>,
     positional: Vec<String>,
 }
 
@@ -33,6 +34,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
         json: false,
         repo: None,
         base: None,
+        branch_type: None,
         positional: Vec::new(),
     };
     let mut it = args.iter();
@@ -42,6 +44,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             "--json" => flags.json = true,
             "--repo" => flags.repo = Some(PathBuf::from(value("--repo")?)),
             "--base" => flags.base = Some(value("--base")?),
+            "--type" => flags.branch_type = Some(value("--type")?),
             a if a.starts_with('-') => return Err(format!("unknown flag {a}\n{USAGE}")),
             a => flags.positional.push(a.to_string()),
         }
@@ -64,12 +67,14 @@ fn run(args: &[String]) -> Result<u8, String> {
     let harvest = Harvest::new(&config.harvest.project, &config.harvest.task);
     let tickets = Tickets::new();
     let state = FileState::new(FileState::default_dir());
+    let today = harvest::Date::today().to_string().replace('-', "");
     let deps = Deps {
         timer: &harvest,
         tickets: &tickets,
         vcs: &Git,
         state: &state,
         settings: &settings,
+        today: &today,
     };
 
     match command.as_str() {
@@ -91,7 +96,8 @@ fn run(args: &[String]) -> Result<u8, String> {
             let request = OpenRequest {
                 ticket: TicketRef(ticket.trim().to_uppercase()),
                 repo,
-                base: flags.base.unwrap_or_else(|| "HEAD".to_string()),
+                branch_type: flags.branch_type.map(|t| BranchType(t.trim().to_lowercase())),
+                base: flags.base,
             };
             Ok(print_open(open(&deps, &request), flags.json))
         }
@@ -108,7 +114,7 @@ fn opt_ref(r: &Option<TicketRef>) -> String {
 fn slice_json(s: &ActiveSlice) -> Value {
     json!({
         "id": s.id.0, "ticket": s.ticket.0, "repo": s.repo, "branch": s.branch,
-        "worktree": s.worktree, "manifest": s.manifest, "timer": s.timer.0,
+        "worktree": s.worktree,
     })
 }
 
@@ -173,20 +179,24 @@ fn print_status(result: PortResult<StatusReport>, as_json: bool) -> u8 {
     report.exit_code() as u8
 }
 
-fn step_name(step: OpenStep) -> &'static str {
+fn step_name(step: Step) -> &'static str {
     match step {
-        OpenStep::Preflight => "preflight",
-        OpenStep::ResolveTicket => "resolve ticket",
-        OpenStep::StopStrayTimer => "stop stray timer",
-        OpenStep::StartTimer => "start timer",
-        OpenStep::SetInProgress => "set ticket in progress",
-        OpenStep::CreateWorktree => "create branch and worktree",
-        OpenStep::WriteManifest => "write manifest",
-        OpenStep::SetActive => "record active slice",
+        Step::Preflight => "preflight",
+        Step::ResolveTicket => "resolve ticket",
+        Step::StopStrayTimer => "stop stray timer",
+        Step::StartTimer => "start timer",
+        Step::SetInProgress => "set ticket in progress",
+        Step::CreateWorktree => "create branch and worktree",
+        Step::WriteManifest => "write manifest",
+        Step::SetActive => "record active slice",
+        Step::StopTimer => "stop timer",
+        Step::SetClosedStatus => "set ticket status",
+        Step::CloseManifest => "close manifest",
+        Step::ClearActive => "clear active slice",
     }
 }
 
-fn print_open(result: Result<OpenOutcome, OpenError>, as_json: bool) -> u8 {
+fn print_open(result: Result<OpenOutcome, SliceError>, as_json: bool) -> u8 {
     let (code, message, value) = match &result {
         Ok(OpenOutcome::Opened(s)) => (
             0,
@@ -210,22 +220,35 @@ fn print_open(result: Result<OpenOutcome, OpenError>, as_json: bool) -> u8 {
         ),
         Err(e) => {
             let (message, value) = match e {
-                OpenError::AnotherSliceActive(s) => (
+                SliceError::AnotherSliceActive(s) => (
                     format!(
                         "slice {} for {} is active; close it before opening another",
                         s.id.0, s.ticket.0
                     ),
                     json!({ "error": "another_slice_active", "slice": slice_json(s) }),
                 ),
-                OpenError::UnknownTicket(r) => (
+                SliceError::UnknownTicket(r) => (
                     format!("no ticket {}", r.0),
                     json!({ "error": "unknown_ticket", "ticket": r.0 }),
                 ),
-                OpenError::Inconsistent(report) => (
+                SliceError::Inconsistent(report) => (
                     "the running timer does not match the active slice; run `slice status`".to_string(),
                     json!({ "error": "inconsistent", "slice": report.active.as_ref().map(slice_json) }),
                 ),
-                OpenError::StepFailed {
+                SliceError::NoActiveSlice => ("no slice is active".to_string(), json!({ "error": "no_active_slice" })),
+                SliceError::BranchOptionsConflict { branch } => (
+                    format!("{branch} already exists; --base and a different --type apply only to a new branch"),
+                    json!({ "error": "branch_options_conflict", "branch": branch }),
+                ),
+                SliceError::TypeRequired => (
+                    "no branch exists for this ticket; pass --type to name one".to_string(),
+                    json!({ "error": "type_required" }),
+                ),
+                SliceError::AmbiguousBranch(branches) => (
+                    format!("more than one branch for this ticket: {}", branches.join(", ")),
+                    json!({ "error": "ambiguous_branch", "branches": branches }),
+                ),
+                SliceError::StepFailed {
                     step,
                     error,
                     undo_failures,

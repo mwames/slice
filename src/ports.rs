@@ -1,6 +1,9 @@
 //! The slice interface: the four ports slice talks to the world through, and
-//! the two operations built on them. Real adapters wrap the worktools crates
-//! and the git CLI; tests use in-memory fakes.
+//! the operations built on them. Real adapters wrap the worktools crates and
+//! the git CLI; tests use in-memory fakes.
+//!
+//! Harvest is tracked per ticket per day, and a branch belongs to a ticket;
+//! slices are internal steps within both (see SLICE-2's rationale).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -11,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 /// A ticket reference such as `ENG-1234` (ClickUp) or `TBOARD-56` (monday),
 /// normalized to uppercase.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TicketRef(pub String);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,7 +32,7 @@ pub struct Ticket {
 }
 
 /// A Harvest time entry id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TimerId(pub i64);
 
 /// A running Harvest timer. `ticket` is the ref found in its notes, if any.
@@ -40,9 +43,47 @@ pub struct Timer {
     pub notes: String,
 }
 
-/// `<TICKET>-<n>`, with n counting slices opened for that ticket.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// `<TICKET>-<n>`, with n counting slices opened for that ticket. Internal:
+/// never written to Harvest, a ticket, or a branch name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SliceId(pub String);
+
+/// The branch type chosen by the caller from the ticket's content, such as
+/// `feature`, `bug` or `refactor`: one lowercase word.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BranchType(pub String);
+
+/// A ticket's branch name, `<type>/<yyyymmdd>-<REF>-<short title>`, taken
+/// apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchName {
+    pub branch_type: BranchType,
+    /// `yyyymmdd`, the day the branch was created.
+    pub date: String,
+    pub ticket: TicketRef,
+    pub short_title: String,
+}
+
+impl BranchName {
+    /// Name the branch for a new slice of `ticket` created on `date`.
+    pub fn new(branch_type: &BranchType, date: &str, ticket: &Ticket) -> BranchName {
+        let _ = (branch_type, date, ticket);
+        todo!()
+    }
+
+    /// Parse a branch name; `None` unless it has the ticket-branch shape.
+    pub fn parse(name: &str) -> Option<BranchName> {
+        let _ = name;
+        todo!()
+    }
+}
+
+impl fmt::Display for BranchName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let _ = f;
+        todo!()
+    }
+}
 
 /// The active slice, as recorded in local state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,23 +93,22 @@ pub struct ActiveSlice {
     pub repo: PathBuf,
     pub branch: String,
     pub worktree: PathBuf,
-    pub manifest: PathBuf,
-    /// The slice's time entry, restarted when the slice is reopened (SLICE-2-7).
-    pub timer: TimerId,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManifestStatus {
     Open,
+    Closed,
 }
 
-/// The slice manifest written into the worktree. Everything after
+/// The slice manifest, kept in local state by slice id. Everything after
 /// `base_commit` is filled in by later pipeline stages; open leaves it empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub id: SliceId,
     pub ticket: TicketRef,
     pub ticket_system: TicketSystemKind,
+    pub branch: String,
     pub base_commit: String,
     pub status: ManifestStatus,
     pub acceptance_criteria: Vec<String>,
@@ -78,15 +118,31 @@ pub struct Manifest {
     pub budgets: Vec<(String, String)>,
 }
 
+/// A ticket status per system.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Statuses {
+    pub clickup: String,
+    pub monday: String,
+}
+
+impl Statuses {
+    pub fn for_system(&self, system: TicketSystemKind) -> &str {
+        match system {
+            TicketSystemKind::ClickUp => &self.clickup,
+            TicketSystemKind::Monday => &self.monday,
+        }
+    }
+}
+
 /// Settings read from `~/.config/slice/config.toml`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
-    /// Status that marks a ClickUp ticket in progress, e.g. `development`.
-    pub clickup_in_progress: String,
-    /// Status that marks a monday item in progress, e.g. `In Progress`.
-    pub monday_in_progress: String,
-    /// Prefix for slice branches, e.g. `slice/`.
-    pub branch_prefix: String,
+    /// Set by open: `development` / `In Progress`.
+    pub in_progress: Statuses,
+    /// Set by close: `dev complete` / `Waiting for review`.
+    pub review: Statuses,
+    /// Set by close --done: `complete` / `Done`.
+    pub done: Statuses,
     /// Directory for worktrees; `None` means `<repo>/../<repo>.slices/`.
     pub worktree_root: Option<PathBuf>,
 }
@@ -136,19 +192,19 @@ pub type PortResult<T> = Result<T, PortError>;
 // Ports
 // ---------------------------------------------------------------------------
 
-/// Harvest timers.
+/// Harvest timers. Each ticket has at most one entry per day that slice uses.
 pub trait TimeTracker {
     /// The running timer, if any.
     fn running(&self) -> PortResult<Option<Timer>>;
-    /// Start a timer for the ticket with the given notes.
-    fn start(&self, ticket: &Ticket, notes: &str) -> PortResult<Timer>;
+    /// The ticket's entry for today, running or stopped: the most recently
+    /// updated entry dated today whose notes name the ticket.
+    fn entry_today(&self, ticket: &TicketRef) -> PortResult<Option<TimerId>>;
+    /// Create and start a new entry for the ticket, noted `<REF> - <title>`.
+    fn start(&self, ticket: &Ticket) -> PortResult<TimerId>;
     fn stop(&self, id: TimerId) -> PortResult<()>;
-    /// Restart a stopped timer; undoes `stop`. Returns the id of the running
-    /// timer, which differs from `id` when the entry cannot be restarted (for
-    /// example, it is from an earlier day) and a new one with the same notes
-    /// is started instead.
-    fn restart(&self, id: TimerId) -> PortResult<TimerId>;
-    /// Delete an entry; undoes `start`.
+    /// Restart a stopped entry dated today.
+    fn restart(&self, id: TimerId) -> PortResult<()>;
+    /// Delete an entry. Only ever used on an entry the same run created.
     fn delete(&self, id: TimerId) -> PortResult<()>;
 }
 
@@ -161,33 +217,44 @@ pub trait TicketSystem {
 
 /// Git, through the git CLI.
 pub trait Vcs {
-    /// Resolve a revision such as `HEAD` to a commit hash.
+    /// Resolve a revision such as `HEAD` or a branch name to a commit hash.
     fn resolve(&self, repo: &Path, rev: &str) -> PortResult<String>;
-    /// Create `branch` at `base` and check it out in a new worktree at `path`,
-    /// with no upstream set.
-    fn create_worktree(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()>;
-    /// Remove the worktree and delete the branch; undoes `create_worktree`.
-    fn remove_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()>;
+    /// Every local branch name in the repo; open picks out the ticket's.
+    fn branches(&self, repo: &Path) -> PortResult<Vec<String>>;
+    /// Where `branch` is checked out in a worktree, if anywhere.
+    fn worktree_of(&self, repo: &Path, branch: &str) -> PortResult<Option<PathBuf>>;
+    /// Create `branch` at `base` with no upstream, checked out in a new
+    /// worktree at `path`. Leaves nothing behind if it fails.
+    fn create_branch(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()>;
+    /// Check out an existing `branch` in a new worktree at `path`.
+    fn add_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()>;
+    /// Remove a worktree; undoes `add_worktree`.
+    fn remove_worktree(&self, repo: &Path, path: &Path) -> PortResult<()>;
+    /// Remove the worktree and delete the branch; undoes `create_branch`.
+    fn remove_branch(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()>;
 }
 
-/// Local slice state (`~/.local/state/slice/`) and manifests.
+/// Local slice state (`~/.local/state/slice/`), manifests included.
 pub trait StateStore {
     fn active(&self) -> PortResult<Option<ActiveSlice>>;
     /// The id the next slice for this ticket would get.
     fn next_slice_id(&self, ticket: &TicketRef) -> PortResult<SliceId>;
     fn set_active(&self, slice: &ActiveSlice) -> PortResult<()>;
     fn clear_active(&self) -> PortResult<()>;
-    fn write_manifest(&self, path: &Path, manifest: &Manifest) -> PortResult<()>;
-    fn remove_manifest(&self, path: &Path) -> PortResult<()>;
+    fn read_manifest(&self, id: &SliceId) -> PortResult<Option<Manifest>>;
+    fn write_manifest(&self, manifest: &Manifest) -> PortResult<()>;
+    fn remove_manifest(&self, id: &SliceId) -> PortResult<()>;
 }
 
-/// Everything status and open need.
+/// Everything the operations need.
 pub struct Deps<'a> {
     pub timer: &'a dyn TimeTracker,
     pub tickets: &'a dyn TicketSystem,
     pub vcs: &'a dyn Vcs,
     pub state: &'a dyn StateStore,
     pub settings: &'a Settings,
+    /// Today as `yyyymmdd`, for naming new branches.
+    pub today: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +316,64 @@ pub fn status(deps: &Deps) -> PortResult<StatusReport> {
 }
 
 // ---------------------------------------------------------------------------
+// Errors shared by open, pause, resume and close
+// ---------------------------------------------------------------------------
+
+/// The steps the operations take. Each successful step that changes
+/// something pushes its undo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Preflight,
+    ResolveTicket,
+    StopStrayTimer,
+    /// Start a new entry or restart today's.
+    StartTimer,
+    SetInProgress,
+    /// Create the branch and worktree, or the worktree for an existing branch.
+    CreateWorktree,
+    WriteManifest,
+    SetActive,
+    StopTimer,
+    /// Set the review or done status.
+    SetClosedStatus,
+    CloseManifest,
+    ClearActive,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SliceError {
+    /// No slice is active (SLICE-3-3, SLICE-4-3, SLICE-5-4).
+    NoActiveSlice,
+    /// A different ticket's slice is active (SLICE-2-3).
+    AnotherSliceActive(Box<ActiveSlice>),
+    /// The ticket does not exist (SLICE-2-5).
+    UnknownTicket(TicketRef),
+    /// The running timer does not match the active slice (SLICE-3-4,
+    /// SLICE-4-4, SLICE-5-5).
+    Inconsistent(Box<StatusReport>),
+    /// --base, or a --type other than the branch's, given for a ticket whose
+    /// branch exists (SLICE-2-10).
+    BranchOptionsConflict { branch: String },
+    /// No branch exists for the ticket and no --type was given (SLICE-2-11).
+    TypeRequired,
+    /// More than one branch matches the ticket (SLICE-2-12).
+    AmbiguousBranch(Vec<String>),
+    /// A step failed. Earlier steps were undone in reverse order; any undo
+    /// that itself failed is listed (SLICE-2-6, SLICE-5-6).
+    StepFailed {
+        step: Step,
+        error: PortError,
+        undo_failures: Vec<(Step, PortError)>,
+    },
+}
+
+impl SliceError {
+    pub fn exit_code(&self) -> i32 {
+        1
+    }
+}
+
+// ---------------------------------------------------------------------------
 // slice open (SLICE-2)
 // ---------------------------------------------------------------------------
 
@@ -256,251 +381,71 @@ pub fn status(deps: &Deps) -> PortResult<StatusReport> {
 pub struct OpenRequest {
     pub ticket: TicketRef,
     pub repo: PathBuf,
-    /// Revision the slice branch starts from; `HEAD` by default.
-    pub base: String,
+    /// Required when the ticket has no branch yet; must match when it does.
+    pub branch_type: Option<BranchType>,
+    /// Where a new branch starts; `HEAD` when `None`. Refused for an
+    /// existing branch.
+    pub base: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpenOutcome {
-    /// A new slice was opened (SLICE-2-1, SLICE-2-2).
+    /// A new slice was opened (SLICE-2-1, 2-2, 2-8, 2-9).
     Opened(ActiveSlice),
-    /// The slice for this ticket was already open; nothing changed (SLICE-2-4).
+    /// The slice for this ticket was already open and timing (SLICE-2-4).
     AlreadyOpen(ActiveSlice),
-    /// The slice for this ticket was open with no timer running; its timer
-    /// was restarted (SLICE-2-7).
+    /// The slice for this ticket was open but paused; its timer is running
+    /// again (SLICE-2-7).
     Resumed(ActiveSlice),
 }
 
-/// The steps of open, in order. Each successful step pushes its undo.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OpenStep {
-    Preflight,
-    ResolveTicket,
-    StopStrayTimer,
-    StartTimer,
-    SetInProgress,
-    CreateWorktree,
-    WriteManifest,
-    SetActive,
+/// Open a slice for the requested ticket: stop any stray timer, run the
+/// ticket's entry for today, set it in progress, use or create its branch and
+/// worktree, write the manifest and record the slice as active.
+pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceError> {
+    let _ = (deps, request);
+    todo!()
+}
+
+// ---------------------------------------------------------------------------
+// slice pause (SLICE-3), resume (SLICE-4), close (SLICE-5)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PauseOutcome {
+    Paused(ActiveSlice),
+    AlreadyPaused(ActiveSlice),
+}
+
+/// Stop the active slice's timer; nothing else changes.
+pub fn pause(deps: &Deps) -> Result<PauseOutcome, SliceError> {
+    let _ = deps;
+    todo!()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OpenError {
-    /// A different ticket's slice is active; nothing changed (SLICE-2-3).
-    AnotherSliceActive(Box<ActiveSlice>),
-    /// The ticket does not exist; nothing changed (SLICE-2-5).
-    UnknownTicket(TicketRef),
-    /// Preflight status found a mismatch; nothing changed.
-    Inconsistent(Box<StatusReport>),
-    /// A step failed. Earlier steps were undone in reverse order, including
-    /// restarting a stopped timer; any undo that itself failed is listed
-    /// (SLICE-2-6).
-    StepFailed {
-        step: OpenStep,
-        error: PortError,
-        undo_failures: Vec<(OpenStep, PortError)>,
-    },
+pub enum ResumeOutcome {
+    Resumed(ActiveSlice),
+    AlreadyRunning(ActiveSlice),
 }
 
-impl OpenError {
-    pub fn exit_code(&self) -> i32 {
-        1
-    }
+/// Run the active slice's ticket's entry for today, restarting it or
+/// starting one.
+pub fn resume(deps: &Deps) -> Result<ResumeOutcome, SliceError> {
+    let _ = deps;
+    todo!()
 }
 
-/// Open a slice for the requested ticket: stop any stray timer, start one
-/// for the ticket, set it in progress, create the branch and worktree, write
-/// the manifest and record the slice as active.
-pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, OpenError> {
-    let failed = |step, error| OpenError::StepFailed {
-        step,
-        error,
-        undo_failures: Vec::new(),
-    };
-
-    // Reads first: nothing below changes anything until every check passes.
-    let report = status(deps).map_err(|e| failed(OpenStep::Preflight, e))?;
-    if let Some(slice) = &report.active {
-        return reopen(deps, request, slice, &report);
-    }
-    let ticket = match deps.tickets.fetch(&request.ticket) {
-        Ok(Some(ticket)) => ticket,
-        Ok(None) => return Err(OpenError::UnknownTicket(request.ticket.clone())),
-        Err(e) => return Err(failed(OpenStep::ResolveTicket, e)),
-    };
-    let id = deps
-        .state
-        .next_slice_id(&ticket.reference)
-        .map_err(|e| failed(OpenStep::Preflight, e))?;
-    let base_commit = deps
-        .vcs
-        .resolve(&request.repo, &request.base)
-        .map_err(|e| failed(OpenStep::CreateWorktree, e))?;
-
-    let branch = format!("{}{}", deps.settings.branch_prefix, id.0);
-    let worktree = worktree_root(deps.settings, &request.repo).join(&id.0);
-    let manifest_path = worktree.join(".slices").join(format!("{}.yaml", id.0));
-    let in_progress = match ticket.system {
-        TicketSystemKind::ClickUp => &deps.settings.clickup_in_progress,
-        TicketSystemKind::Monday => &deps.settings.monday_in_progress,
-    };
-
-    let mut undo = Undo::default();
-    let result = (|| {
-        if let Some(stray) = &report.timer {
-            deps.timer.stop(stray.id).map_err(|e| (OpenStep::StopStrayTimer, e))?;
-            undo.push(OpenStep::StopStrayTimer, Action::Restart(stray.id));
-        }
-
-        let notes = format!("{} - {} [slice:{}]", ticket.reference.0, ticket.title, id.0);
-        let timer = deps
-            .timer
-            .start(&ticket, &notes)
-            .map_err(|e| (OpenStep::StartTimer, e))?;
-        undo.push(OpenStep::StartTimer, Action::Delete(timer.id));
-
-        deps.tickets
-            .set_status(&ticket.reference, in_progress)
-            .map_err(|e| (OpenStep::SetInProgress, e))?;
-        undo.push(
-            OpenStep::SetInProgress,
-            Action::SetStatus(ticket.reference.clone(), ticket.status.clone()),
-        );
-
-        deps.vcs
-            .create_worktree(&request.repo, &branch, &worktree, &base_commit)
-            .map_err(|e| (OpenStep::CreateWorktree, e))?;
-        undo.push(
-            OpenStep::CreateWorktree,
-            Action::RemoveWorktree(request.repo.clone(), branch.clone(), worktree.clone()),
-        );
-
-        let manifest = Manifest {
-            id: id.clone(),
-            ticket: ticket.reference.clone(),
-            ticket_system: ticket.system,
-            base_commit: base_commit.clone(),
-            status: ManifestStatus::Open,
-            acceptance_criteria: Vec::new(),
-            invariants: Vec::new(),
-            spec_hash: None,
-            test_hash: None,
-            budgets: Vec::new(),
-        };
-        deps.state
-            .write_manifest(&manifest_path, &manifest)
-            .map_err(|e| (OpenStep::WriteManifest, e))?;
-        undo.push(OpenStep::WriteManifest, Action::RemoveManifest(manifest_path.clone()));
-
-        let slice = ActiveSlice {
-            id: id.clone(),
-            ticket: ticket.reference.clone(),
-            repo: request.repo.clone(),
-            branch: branch.clone(),
-            worktree: worktree.clone(),
-            manifest: manifest_path.clone(),
-            timer: timer.id,
-        };
-        deps.state.set_active(&slice).map_err(|e| (OpenStep::SetActive, e))?;
-        Ok(slice)
-    })();
-
-    match result {
-        Ok(slice) => Ok(OpenOutcome::Opened(slice)),
-        Err((step, error)) => Err(OpenError::StepFailed {
-            step,
-            error,
-            undo_failures: undo.unwind(deps),
-        }),
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseRequest {
+    /// Move the ticket to done rather than review.
+    pub done: bool,
 }
 
-/// Open for a ticket while a slice is active: the same ticket's slice is
-/// already open (SLICE-2-4) or paused and resumed (SLICE-2-7); a different
-/// ticket's slice blocks the open (SLICE-2-3).
-fn reopen(
-    deps: &Deps,
-    request: &OpenRequest,
-    slice: &ActiveSlice,
-    report: &StatusReport,
-) -> Result<OpenOutcome, OpenError> {
-    if slice.ticket != request.ticket {
-        return Err(OpenError::AnotherSliceActive(Box::new(slice.clone())));
-    }
-    if report.mismatch.is_some() {
-        return Err(OpenError::Inconsistent(Box::new(report.clone())));
-    }
-    if report.timer.is_some() {
-        return Ok(OpenOutcome::AlreadyOpen(slice.clone()));
-    }
-
-    let failed = |step, error, undo_failures| OpenError::StepFailed {
-        step,
-        error,
-        undo_failures,
-    };
-    let timer = deps
-        .timer
-        .restart(slice.timer)
-        .map_err(|e| failed(OpenStep::StartTimer, e, Vec::new()))?;
-    if timer == slice.timer {
-        return Ok(OpenOutcome::Resumed(slice.clone()));
-    }
-    // A new entry replaced the old one; record it so the next resume finds it.
-    let resumed = ActiveSlice { timer, ..slice.clone() };
-    if let Err(e) = deps.state.set_active(&resumed) {
-        let mut undo = Undo::default();
-        undo.push(OpenStep::StartTimer, Action::Delete(timer));
-        return Err(failed(OpenStep::SetActive, e, undo.unwind(deps)));
-    }
-    Ok(OpenOutcome::Resumed(resumed))
-}
-
-/// `<repo>/../<repo name>.slices/` unless configured.
-fn worktree_root(settings: &Settings, repo: &Path) -> PathBuf {
-    if let Some(root) = &settings.worktree_root {
-        return root.clone();
-    }
-    let name = repo
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    repo.parent().unwrap_or(repo).join(format!("{name}.slices"))
-}
-
-/// The compensating action for a completed step of open.
-enum Action {
-    Restart(TimerId),
-    Delete(TimerId),
-    SetStatus(TicketRef, String),
-    RemoveWorktree(PathBuf, String, PathBuf),
-    RemoveManifest(PathBuf),
-}
-
-#[derive(Default)]
-struct Undo(Vec<(OpenStep, Action)>);
-
-impl Undo {
-    fn push(&mut self, step: OpenStep, action: Action) {
-        self.0.push((step, action));
-    }
-
-    /// Run every compensating action in reverse order, continuing past
-    /// failures, and return the ones that failed.
-    fn unwind(self, deps: &Deps) -> Vec<(OpenStep, PortError)> {
-        let mut failures = Vec::new();
-        for (step, action) in self.0.into_iter().rev() {
-            let result = match action {
-                Action::Restart(id) => deps.timer.restart(id).map(|_| ()),
-                Action::Delete(id) => deps.timer.delete(id),
-                Action::SetStatus(r, status) => deps.tickets.set_status(&r, &status),
-                Action::RemoveWorktree(repo, branch, path) => deps.vcs.remove_worktree(&repo, &branch, &path),
-                Action::RemoveManifest(path) => deps.state.remove_manifest(&path),
-            };
-            if let Err(e) = result {
-                failures.push((step, e));
-            }
-        }
-        failures
-    }
+/// Stop the timer, move the ticket to review or done, mark the manifest
+/// closed and clear the active slice. The branch and worktree stay. Returns
+/// the slice that was closed.
+pub fn close(deps: &Deps, request: &CloseRequest) -> Result<ActiveSlice, SliceError> {
+    let _ = (deps, request);
+    todo!()
 }

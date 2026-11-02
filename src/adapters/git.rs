@@ -45,7 +45,7 @@ impl Vcs for Git {
         .map_err(|_| err(format!("{rev} is not a commit in {}", repo.display())))
     }
 
-    fn create_worktree(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()> {
+    fn create_branch(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()> {
         let path = path.to_string_lossy();
         let branch_ref = format!("refs/heads/{branch}");
         let existed = git(repo, &["rev-parse", "--verify", "--quiet", &branch_ref]).is_ok();
@@ -58,7 +58,27 @@ impl Vcs for Git {
         result
     }
 
-    fn remove_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+    fn branches(&self, repo: &Path) -> PortResult<Vec<String>> {
+        let _ = repo;
+        todo!()
+    }
+
+    fn worktree_of(&self, repo: &Path, branch: &str) -> PortResult<Option<PathBuf>> {
+        let _ = (repo, branch);
+        todo!()
+    }
+
+    fn add_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+        let _ = (repo, branch, path);
+        todo!()
+    }
+
+    fn remove_worktree(&self, repo: &Path, path: &Path) -> PortResult<()> {
+        let _ = (repo, path);
+        todo!()
+    }
+
+    fn remove_branch(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
         let path = path.to_string_lossy();
         git(repo, &["worktree", "remove", "--force", &path])?;
         git(repo, &["branch", "-D", branch]).map(|_| ())

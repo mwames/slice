@@ -1,12 +1,19 @@
 //! `~/.config/slice/config.toml`. Every key is optional:
 //!
 //! ```toml
-//! branch_prefix = "slice/"
 //! worktree_root = "~/work/slices"      # default: <repo>/../<repo>.slices/
 //!
-//! [status.in_progress]
+//! [status.in_progress]                 # set by open
 //! clickup = "development"
 //! monday = "In Progress"
+//!
+//! [status.review]                      # set by close
+//! clickup = "dev complete"
+//! monday = "Waiting for review"
+//!
+//! [status.done]                        # set by close --done
+//! clickup = "complete"
+//! monday = "Done"
 //!
 //! [harvest]
 //! project = "Acme Product"
@@ -17,12 +24,11 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::ports::Settings;
+use crate::ports::{Settings, Statuses};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub branch_prefix: Option<String>,
     pub worktree_root: Option<String>,
     pub status: StatusConfig,
     pub harvest: HarvestConfig,
@@ -31,14 +37,25 @@ pub struct Config {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatusConfig {
-    pub in_progress: InProgress,
+    pub in_progress: StatusNames,
+    pub review: StatusNames,
+    pub done: StatusNames,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct InProgress {
+pub struct StatusNames {
     pub clickup: Option<String>,
     pub monday: Option<String>,
+}
+
+impl StatusNames {
+    fn or(&self, clickup: &str, monday: &str) -> Statuses {
+        Statuses {
+            clickup: self.clickup.clone().unwrap_or_else(|| clickup.to_string()),
+            monday: self.monday.clone().unwrap_or_else(|| monday.to_string()),
+        }
+    }
 }
 
 /// Where slice timers are logged. The defaults match `hv start`.
@@ -93,19 +110,9 @@ impl Config {
 
     pub fn settings(&self) -> Settings {
         Settings {
-            clickup_in_progress: self
-                .status
-                .in_progress
-                .clickup
-                .clone()
-                .unwrap_or_else(|| "development".to_string()),
-            monday_in_progress: self
-                .status
-                .in_progress
-                .monday
-                .clone()
-                .unwrap_or_else(|| "In Progress".to_string()),
-            branch_prefix: self.branch_prefix.clone().unwrap_or_else(|| "slice/".to_string()),
+            in_progress: self.status.in_progress.or("development", "In Progress"),
+            review: self.status.review.or("dev complete", "Waiting for review"),
+            done: self.status.done.or("complete", "Done"),
             worktree_root: self.worktree_root.as_deref().map(expand_home),
         }
     }

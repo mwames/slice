@@ -1,6 +1,6 @@
 //! `StateStore` on the local filesystem: the active slice and per-ticket slice
 //! counts as JSON under `$XDG_STATE_HOME/slice` (default
-//! `~/.local/state/slice`), and manifests as YAML inside the worktree.
+//! `~/.local/state/slice`), and manifests as YAML in `manifests/` there.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::home;
 use crate::ports::{
     ActiveSlice, Manifest, ManifestStatus, PortError, PortResult, SliceId, Source, StateStore, TicketRef,
-    TicketSystemKind, TimerId,
+    TicketSystemKind,
 };
 
 pub struct FileState {
@@ -34,8 +34,6 @@ struct ActiveFile {
     repo: PathBuf,
     branch: String,
     worktree: PathBuf,
-    manifest: PathBuf,
-    timer: i64,
 }
 
 impl FileState {
@@ -92,8 +90,6 @@ impl StateStore for FileState {
             repo: f.repo,
             branch: f.branch,
             worktree: f.worktree,
-            manifest: f.manifest,
-            timer: TimerId(f.timer),
         }))
     }
 
@@ -114,8 +110,6 @@ impl StateStore for FileState {
             repo: slice.repo.clone(),
             branch: slice.branch.clone(),
             worktree: slice.worktree.clone(),
-            manifest: slice.manifest.clone(),
-            timer: slice.timer.0,
         };
         self.write_json(&self.active_path(), &f)
     }
@@ -128,18 +122,19 @@ impl StateStore for FileState {
         }
     }
 
-    fn write_manifest(&self, path: &Path, manifest: &Manifest) -> PortResult<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
-        }
-        fs::write(path, manifest_yaml(manifest)).map_err(|e| err(path, e))
+    fn read_manifest(&self, id: &SliceId) -> PortResult<Option<Manifest>> {
+        let _ = id;
+        todo!()
     }
 
-    fn remove_manifest(&self, path: &Path) -> PortResult<()> {
-        match fs::remove_file(path) {
-            Err(e) if e.kind() != ErrorKind::NotFound => Err(err(path, e)),
-            _ => Ok(()),
-        }
+    fn write_manifest(&self, manifest: &Manifest) -> PortResult<()> {
+        let _ = manifest;
+        todo!()
+    }
+
+    fn remove_manifest(&self, id: &SliceId) -> PortResult<()> {
+        let _ = id;
+        todo!()
     }
 }
 
@@ -160,6 +155,7 @@ pub fn manifest_yaml(m: &Manifest) -> String {
     };
     let status = match m.status {
         ManifestStatus::Open => "open",
+        ManifestStatus::Closed => "closed",
     };
     let budgets = if m.budgets.is_empty() {
         " {}".to_string()

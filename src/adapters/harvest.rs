@@ -2,7 +2,7 @@
 
 use std::cell::OnceCell;
 
-use harvest::{Client, Date, StartInput, System, Target, TimeEntry};
+use harvest::{Client, System, TimeEntry};
 
 use crate::ports::{PortError, PortResult, Source, Ticket, TicketRef, TimeTracker, Timer, TimerId};
 
@@ -61,36 +61,23 @@ impl TimeTracker for Harvest {
         Ok(client.running_entry().map_err(err)?.map(|e| self.timer(client, &e)))
     }
 
-    fn start(&self, _ticket: &Ticket, notes: &str) -> PortResult<Timer> {
-        let client = self.client()?;
-        let target = client.resolve_target(&self.project, &self.task).map_err(err)?;
-        let input = StartInput {
-            target,
-            notes: notes.to_string(),
-            ..StartInput::default()
-        };
-        let entry = client.start_timer(&input).map_err(err)?;
-        Ok(self.timer(client, &entry))
+    fn entry_today(&self, ticket: &TicketRef) -> PortResult<Option<TimerId>> {
+        let _ = ticket;
+        todo!()
+    }
+
+    fn start(&self, ticket: &Ticket) -> PortResult<TimerId> {
+        let _ = ticket;
+        todo!()
     }
 
     fn stop(&self, id: TimerId) -> PortResult<()> {
         self.client()?.stop_timer(id.0).map(|_| ()).map_err(err)
     }
 
-    fn restart(&self, id: TimerId) -> PortResult<TimerId> {
-        let client = self.client()?;
-        let entry = client.entry(id.0).map_err(err)?;
-        if entry.spent_date.equal(Date::today()) {
-            return client.restart_timer(id.0).map(|e| TimerId(e.id)).map_err(err);
-        }
-        // An entry from an earlier day stays on that day; continue the work in
-        // a new entry today with the same project, task and notes.
-        let input = StartInput {
-            target: Target::of(&entry),
-            notes: entry.notes.clone(),
-            ..StartInput::default()
-        };
-        client.start_timer(&input).map(|e| TimerId(e.id)).map_err(err)
+    fn restart(&self, id: TimerId) -> PortResult<()> {
+        let _ = id;
+        todo!()
     }
 
     fn delete(&self, id: TimerId) -> PortResult<()> {
