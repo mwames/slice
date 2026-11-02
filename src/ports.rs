@@ -110,9 +110,21 @@ pub struct PortError {
     pub message: String,
 }
 
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Source::Harvest => "Harvest",
+            Source::TicketSystem(TicketSystemKind::ClickUp) => "ClickUp",
+            Source::TicketSystem(TicketSystemKind::Monday) => "monday",
+            Source::Git => "git",
+            Source::LocalState => "local state",
+        })
+    }
+}
+
 impl fmt::Display for PortError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}: {}", self.source, self.message)
+        write!(f, "{}: {}", self.source, self.message)
     }
 }
 

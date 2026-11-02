@@ -1,0 +1,58 @@
+//! `Vcs` over the git CLI.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::ports::{PortError, PortResult, Source, Vcs};
+
+pub struct Git;
+
+fn err(message: impl Into<String>) -> PortError {
+    PortError {
+        source: Source::Git,
+        message: message.into(),
+    }
+}
+
+/// Run git in `repo` and return trimmed stdout, or stderr as the error.
+fn git(repo: &Path, args: &[&str]) -> PortResult<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|e| err(format!("run git: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(err(format!("git {}: {stderr}", args.join(" "))));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+impl Git {
+    /// The top level of the repository containing `dir`.
+    pub fn toplevel(dir: &Path) -> PortResult<PathBuf> {
+        git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    }
+}
+
+impl Vcs for Git {
+    fn resolve(&self, repo: &Path, rev: &str) -> PortResult<String> {
+        git(
+            repo,
+            &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")],
+        )
+        .map_err(|_| err(format!("{rev} is not a commit in {}", repo.display())))
+    }
+
+    fn create_worktree(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()> {
+        let path = path.to_string_lossy();
+        git(repo, &["worktree", "add", "--no-track", "-b", branch, &path, base]).map(|_| ())
+    }
+
+    fn remove_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+        let path = path.to_string_lossy();
+        git(repo, &["worktree", "remove", "--force", &path])?;
+        git(repo, &["branch", "-D", branch]).map(|_| ())
+    }
+}
