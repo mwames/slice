@@ -12,12 +12,7 @@ fn ticket(r: &str, title: &str) -> Ticket {
 }
 
 fn name(title: &str) -> String {
-    BranchName::new(
-        &BranchType("feature".into()),
-        "20261102",
-        &ticket("TBOARD-405", title),
-    )
-    .to_string()
+    BranchName::new(&BranchType("feature".into()), "20261102", &ticket("TBOARD-405", title)).to_string()
 }
 
 // SLICE-2-1
