@@ -165,6 +165,7 @@ pub fn manifest_yaml(m: &Manifest) -> String {
     let status = match m.status {
         ManifestStatus::Open => "open",
         ManifestStatus::Closed => "closed",
+        ManifestStatus::Abandoned => todo!("SLICE-6"),
     };
     let budgets = if m.budgets.is_empty() {
         " {}".to_string()

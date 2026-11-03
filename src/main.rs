@@ -11,7 +11,8 @@ const USAGE: &str = "usage:
   slice open <TICKET> [--type TYPE] [--repo PATH] [--base REF] [--json]
   slice pause [--json]
   slice resume [--json]
-  slice close [--done] [--json]";
+  slice close [--done] [--json]
+  slice abandon [--json]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -124,7 +125,7 @@ fn run(args: &[String]) -> Result<u8, String> {
                 ),
             }))
         }
-        "pause" | "resume" | "close" if !flags.positional.is_empty() => Err(USAGE.to_string()),
+        "pause" | "resume" | "close" | "abandon" if !flags.positional.is_empty() => Err(USAGE.to_string()),
         "pause" => Ok(print_result(pause(&deps), flags.json, |o| match o {
             PauseOutcome::Paused(s) => ("paused", format!("paused {}", s.id.0), s),
             PauseOutcome::AlreadyPaused(s) => ("already_paused", format!("{} is already paused", s.id.0), s),
@@ -147,6 +148,16 @@ fn run(args: &[String]) -> Result<u8, String> {
                 )
             }))
         }
+        "abandon" => Ok(print_result(abandon(&deps), flags.json, |s| {
+            (
+                "abandoned",
+                format!(
+                    "abandoned {}; {} left as it was; branch {} kept",
+                    s.id.0, s.ticket.0, s.branch
+                ),
+                s,
+            )
+        })),
         other => Err(format!("unknown command {other}\n{USAGE}")),
     }
 }
@@ -227,6 +238,7 @@ fn step_name(step: Step) -> &'static str {
         Step::StopTimer => "stop timer",
         Step::SetClosedStatus => "set ticket status",
         Step::CloseManifest => "close manifest",
+        Step::AbandonManifest => "mark manifest abandoned",
         Step::ClearActive => "clear active slice",
     }
 }
