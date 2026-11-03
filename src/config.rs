@@ -15,8 +15,8 @@
 //! clickup = "complete"
 //! monday = "Done"
 //!
-//! [harvest]
-//! project = "Acme Product"
+//! [harvest]                           # default: HARVEST_DEFAULT_PROJECT
+//! project = "Acme Product"             # and HARVEST_DEFAULT_TASK
 //! task = "New Development"
 //! ```
 
@@ -58,21 +58,13 @@ impl StatusNames {
     }
 }
 
-/// Where slice timers are logged. The defaults match `hv start`.
-#[derive(Debug, Deserialize)]
+/// Where slice timers are logged. Empty means Harvest's own defaults,
+/// HARVEST_DEFAULT_PROJECT and HARVEST_DEFAULT_TASK, which `hv start` uses too.
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HarvestConfig {
     pub project: String,
     pub task: String,
-}
-
-impl Default for HarvestConfig {
-    fn default() -> Self {
-        HarvestConfig {
-            project: "Acme Product".to_string(),
-            task: "New Development".to_string(),
-        }
-    }
 }
 
 pub fn home() -> PathBuf {

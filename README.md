@@ -49,8 +49,10 @@ cargo build --release
 cp target/release/slice ~/bin/slice
 ```
 
-Credentials come from the same places the worktools CLIs read them: Harvest
-from `~/.config/harvest/credentials`, ClickUp and monday from their env files.
+Credentials and workspace settings come from the same files the worktools CLIs
+read, in your home directory: `~/.config/harvest/credentials`, `~/.clickup-env`
+and `~/.monday-env` (see the worktools README). Which ticket goes to ClickUp and
+which to monday follows `HARVEST_CLICKUP_PREFIXES` and `HARVEST_MONDAY_PREFIXES`.
 
 ## Configuration
 
@@ -76,7 +78,10 @@ project = "Acme Product"
 task = "New Development"
 ```
 
-The values shown are the defaults, apart from `worktree_root`. State such as the
+The status names shown are the defaults. `worktree_root` defaults to
+`<repo>/../<repo>.slices/`. Without `[harvest]`, timers go to
+`HARVEST_DEFAULT_PROJECT` and `HARVEST_DEFAULT_TASK`, the same place `hv start`
+uses. State such as the
 active slice and the manifests lives in `~/.local/state/slice/`.
 
 ## Tests

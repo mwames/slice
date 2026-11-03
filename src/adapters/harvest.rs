@@ -9,7 +9,7 @@ use crate::ports::{PortError, PortResult, Source, Ticket, TicketRef, TimeTracker
 pub struct Harvest {
     project: String,
     task: String,
-    client: OnceCell<Result<Client, String>>,
+    client: OnceCell<Result<(Client, harvest::Config), String>>,
 }
 
 fn err(e: impl std::fmt::Display) -> PortError {
@@ -28,17 +28,41 @@ impl Harvest {
         }
     }
 
-    /// The client, built on first use so commands that never touch Harvest
-    /// do not need its credentials.
-    fn client(&self) -> PortResult<&Client> {
+    /// The client and its config, loaded on first use so commands that never
+    /// touch Harvest do not need its credentials.
+    fn loaded(&self) -> PortResult<&(Client, harvest::Config)> {
         self.client
             .get_or_init(|| {
-                harvest::Config::load()
-                    .and_then(|c| c.client(Vec::new()))
-                    .map_err(|e| e.to_string())
+                let config = harvest::Config::load().map_err(|e| e.to_string())?;
+                let client = config.client(Vec::new()).map_err(|e| e.to_string())?;
+                Ok((client, config))
             })
             .as_ref()
             .map_err(err)
+    }
+
+    fn client(&self) -> PortResult<&Client> {
+        self.loaded().map(|(client, _)| client)
+    }
+
+    /// The project and task from slice's config, or else Harvest's
+    /// HARVEST_DEFAULT_PROJECT and HARVEST_DEFAULT_TASK, the same defaults
+    /// `hv start` uses.
+    fn project_and_task(&self) -> PortResult<(&str, &str)> {
+        let (_, config) = self.loaded()?;
+        fn pick<'a>(own: &'a str, default: &'a str) -> &'a str {
+            if own.is_empty() { default } else { own }
+        }
+        let project = pick(&self.project, &config.default_project);
+        let task = pick(&self.task, &config.default_task);
+        if project.is_empty() || task.is_empty() {
+            return Err(err(format!(
+                "no Harvest project and task: set [harvest] in ~/.config/slice/config.toml, \
+                 or HARVEST_DEFAULT_PROJECT and HARVEST_DEFAULT_TASK in {}",
+                harvest::DEFAULT_CREDENTIALS_FILE
+            )));
+        }
+        Ok((project, task))
     }
 
     fn timer(&self, client: &Client, entry: &TimeEntry) -> Timer {
@@ -79,7 +103,8 @@ impl TimeTracker for Harvest {
 
     fn start(&self, ticket: &Ticket) -> PortResult<TimerId> {
         let client = self.client()?;
-        let target = client.resolve_target(&self.project, &self.task).map_err(err)?;
+        let (project, task) = self.project_and_task()?;
+        let target = client.resolve_target(project, task).map_err(err)?;
         let input = StartInput {
             target,
             notes: format!("{} - {}", ticket.reference.0, ticket.title),
