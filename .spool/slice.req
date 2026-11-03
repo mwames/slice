@@ -485,3 +485,100 @@ requirements:
           For every run of slice close that exits non-zero, the slice is
           still active, its timer's running state, the ticket's status, and
           the manifest are what they were before the run.
+
+  - id: SLICE-6
+    title: Slice Abandon
+    description: >
+      Running slice abandon ends the active slice without moving its
+      ticket: its timer is stopped, the manifest is marked abandoned, and no
+      slice is active afterward. The ticket's status, the Harvest time
+      already logged, and the branch and worktree are all left as they are.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-03
+    rationale: >
+      Close is the only way to end a slice, and it always moves the ticket
+      to review or done. Work that stops for any other reason, such as a
+      ticket that turns out to be fixed already or a product being retired,
+      needs a way to free the one-active-slice slot without claiming the
+      work is ready. The time was really spent, so the Harvest entry stays.
+      What happens to the ticket is left to a person. Like close, every
+      step can be undone.
+    superseded_by:
+    out_of_scope:
+      - Changing, commenting on, or reassigning the ticket
+      - Deleting or editing Harvest time
+      - Removing the branch or worktree
+      - Abandoning a slice that is not the active one
+      - Recording a reason for abandoning
+    acceptance_criteria:
+      - id: SLICE-6-1
+        title: Abandon
+        status: active
+        description: >
+          Given an active slice for ticket T with its timer running,
+          when slice abandon is run,
+          then the timer is not running and its Harvest entry still exists,
+          T's status is unchanged and was not written, the manifest's status
+          is abandoned, no slice is active, the branch and worktree still
+          exist, and it exits zero.
+
+      - id: SLICE-6-2
+        title: Abandon Paused Slice
+        status: active
+        description: >
+          Given an active slice and no running Harvest timer,
+          when slice abandon is run,
+          then it completes as in SLICE-6-1 without starting or stopping
+          any timer.
+
+      - id: SLICE-6-3
+        title: Nothing To Abandon
+        status: active
+        description: >
+          Given no active slice,
+          when slice abandon is run,
+          then it prints a single line saying no slice is active, changes
+          nothing, and exits non-zero.
+
+      - id: SLICE-6-4
+        title: Abandon Mismatch
+        status: active
+        description: >
+          Given an active slice and a running Harvest timer for a different
+          ticket or for no ticket,
+          when slice abandon is run,
+          then it reports the mismatch with both values, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-6-5
+        title: Abandon Partial Failure
+        status: active
+        description: >
+          Given a step of slice abandon fails after an earlier step succeeded,
+          when slice abandon is run,
+          then it undoes the earlier steps it performed in reverse order,
+          including restarting a timer it stopped, reports which step
+          failed, and exits non-zero.
+
+      - id: SLICE-6-6
+        title: Reopen After Abandon
+        status: active
+        description: >
+          Given ticket T's slice was abandoned,
+          when slice open T is run,
+          then a new slice for T opens on T's existing branch and worktree,
+          with the next slice id.
+
+    invariants:
+      - id: SLICE-6-I1
+        title: Abandon Never Touches The Ticket
+        status: active
+        description: >
+          For every run of slice abandon, successful or not, no ticket
+          status is written, and when it exits non-zero the slice is still
+          active and its timer's running state and manifest are what they
+          were before the run.
