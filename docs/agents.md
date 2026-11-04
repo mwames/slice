@@ -85,10 +85,14 @@ pinned in `Cargo.lock`:
 clickup = { git = "https://github.com/mwames/worktools", rev = "…" }
 ```
 
-The image build fetches and pre-compiles them, which also lets a fresh clone
-of slice build on its own. For work on both repositories at once, a `[patch]`
-entry in your user-level `~/.cargo/config.toml` points slice back at
-`../worktools`; it lives outside the repository, so it's never committed. A
+The image build pre-compiles them, and a fresh clone of slice builds on its
+own. worktools is a private repository, so Cargo fetches it with the git CLI
+and your own credentials (`net.git-fetch-with-cli` in slice's
+`.cargo/config.toml`); see "Images" for how the image gets it without them.
+For work on both repositories at once, a `[patch]` entry in your user-level
+`~/.cargo/config.toml` points slice back at `../worktools`. It lives outside
+the repository, so it's never committed, but it overrides the pin in every
+build, so add it only while changing both and remove it afterwards. A
 repository with a sibling path dependency follows the same rule.
 
 ## Images
@@ -97,9 +101,13 @@ One image per language stack, built from the repository's lockfile, so a run
 needs no package registry:
 
 - **Rust:** `rust:<pinned>-slim`, plus `git` and the Claude Code CLI at a
-  pinned version. `cargo fetch` runs at build time against `Cargo.lock`, and
-  `CARGO_NET_OFFLINE=true` is set at run time, so a missing crate fails fast
-  instead of reaching the network.
+  pinned version. Dependencies are vendored on the host, not fetched in the
+  build: `cargo vendor` runs against `Cargo.lock` with your credentials, and
+  the vendored source is copied into the image along with the config that
+  points Cargo at it. Neither the image build nor a run ever holds a GitHub
+  credential, even though worktools is private. `CARGO_NET_OFFLINE=true` is
+  set at run time, so a missing crate fails fast instead of reaching the
+  network.
 - **Node** (provision-web and similar), later: `node:<.nvmrc>-slim`, `npm ci`
   at build time.
 
