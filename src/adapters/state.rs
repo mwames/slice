@@ -165,6 +165,7 @@ pub fn manifest_yaml(m: &Manifest) -> String {
     let status = match m.status {
         ManifestStatus::Open => "open",
         ManifestStatus::Closed => "closed",
+        ManifestStatus::Abandoned => "abandoned",
     };
     let budgets = if m.budgets.is_empty() {
         " {}".to_string()
@@ -213,6 +214,7 @@ pub fn parse_manifest_yaml(text: &str) -> Result<Manifest, String> {
     let status = match field("status")? {
         "open" => ManifestStatus::Open,
         "closed" => ManifestStatus::Closed,
+        "abandoned" => ManifestStatus::Abandoned,
         other => return Err(format!("unknown status {other}")),
     };
     Ok(Manifest {

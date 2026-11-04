@@ -238,4 +238,22 @@ proptest! {
             prop_assert_eq!(&after.manifests, &before.manifests, "manifest");
         }
     }
+
+    // invariant: SLICE-6-I1
+    #[test]
+    fn abandon_never_touches_the_ticket(s in start()) {
+        let fake = s.build();
+        let before = fake.snapshot();
+
+        let result = abandon(&fake.deps());
+
+        let after = fake.snapshot();
+        prop_assert!(!fake.write_ops().contains(&"set_status".to_string()), "ticket status written");
+        prop_assert_eq!(&after.tickets, &before.tickets, "ticket status");
+        if result.is_err() {
+            prop_assert_eq!(&after.active, &before.active, "slice still active");
+            prop_assert_eq!(after.entry_states(), before.entry_states(), "timer running state");
+            prop_assert_eq!(&after.manifests, &before.manifests, "manifest");
+        }
+    }
 }

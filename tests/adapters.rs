@@ -249,6 +249,14 @@ fn manifests_kept_in_state_by_slice_id() {
     assert!(std::fs::read_to_string(&path).unwrap().contains("status: closed\n"));
     assert_eq!(state.read_manifest(&id).unwrap(), Some(closed));
 
+    let abandoned = Manifest {
+        status: ManifestStatus::Abandoned,
+        ..manifest()
+    };
+    state.write_manifest(&abandoned).unwrap();
+    assert!(std::fs::read_to_string(&path).unwrap().contains("status: abandoned\n"));
+    assert_eq!(state.read_manifest(&id).unwrap(), Some(abandoned));
+
     state.remove_manifest(&id).unwrap();
     assert!(!path.exists());
     state.remove_manifest(&id).unwrap();

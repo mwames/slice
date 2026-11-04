@@ -156,6 +156,8 @@ pub struct ActiveSlice {
 pub enum ManifestStatus {
     Open,
     Closed,
+    /// Ended by abandon: the ticket was left as it was (SLICE-6).
+    Abandoned,
 }
 
 /// The slice manifest, kept in local state by slice id. Everything after
@@ -394,6 +396,8 @@ pub enum Step {
     /// Set the review or done status.
     SetClosedStatus,
     CloseManifest,
+    /// Mark the manifest abandoned.
+    AbandonManifest,
     ClearActive,
 }
 
@@ -766,6 +770,53 @@ fn resume_active(deps: &Deps, slice: &ActiveSlice, report: &StatusReport) -> Res
     // A single write: nothing earlier to undo if it fails.
     run_entry(deps, ticket, entry, &mut Undo::default()).map_err(|e| failed(Step::StartTimer, e))?;
     Ok(ResumeOutcome::Resumed(slice.clone()))
+}
+
+/// Stop the timer, mark the manifest abandoned and clear the active slice,
+/// without writing the ticket's status. The Harvest entry, branch and worktree
+/// stay. Returns the slice that was abandoned (SLICE-6).
+pub fn abandon(deps: &Deps) -> Result<ActiveSlice, SliceError> {
+    let (slice, report) = active_slice(deps)?;
+    let manifest = match deps.state.read_manifest(&slice.id) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            let error = PortError {
+                source: Source::LocalState,
+                message: format!("no manifest for slice {}", slice.id.0),
+            };
+            return Err(failed(Step::Preflight, error));
+        }
+        Err(e) => return Err(failed(Step::Preflight, e)),
+    };
+
+    // Close without its status step: the ticket is never written.
+    let mut undo = Undo::default();
+    let result = (|| {
+        if let Some(timer) = &report.timer {
+            deps.timer.stop(timer.id).map_err(|e| (Step::StopTimer, e))?;
+            undo.push(Step::StopTimer, Action::Restart(timer.id));
+        }
+
+        let abandoned = Manifest {
+            status: ManifestStatus::Abandoned,
+            ..manifest.clone()
+        };
+        deps.state
+            .write_manifest(&abandoned)
+            .map_err(|e| (Step::AbandonManifest, e))?;
+        undo.push(Step::AbandonManifest, Action::WriteManifest(Box::new(manifest.clone())));
+
+        deps.state.clear_active().map_err(|e| (Step::ClearActive, e))
+    })();
+
+    match result {
+        Ok(()) => Ok(slice),
+        Err((step, error)) => Err(SliceError::StepFailed {
+            step,
+            error,
+            undo_failures: undo.unwind(deps),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

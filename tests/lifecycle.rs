@@ -1,4 +1,4 @@
-//! slice pause (SLICE-3), resume (SLICE-4) and close (SLICE-5).
+//! slice pause (SLICE-3), resume (SLICE-4), close (SLICE-5) and abandon (SLICE-6).
 
 mod common;
 
@@ -336,4 +336,175 @@ fn close_partial_failure_undoes_in_reverse_order() {
             format!("restart {}", entry.0),
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// abandon
+// ---------------------------------------------------------------------------
+
+/// Everything SLICE-6-1 requires of a completed abandon.
+fn assert_abandoned(fake: &Fake, abandoned: &ActiveSlice, slice: &ActiveSlice, before: &World) {
+    assert_eq!(abandoned, slice);
+    let after = fake.snapshot();
+    assert!(after.running().is_empty(), "timer not running");
+    assert_eq!(
+        after.entries.keys().collect::<Vec<_>>(),
+        before.entries.keys().collect::<Vec<_>>(),
+        "Harvest entries kept"
+    );
+    assert_eq!(after.tickets, before.tickets, "ticket unchanged");
+    assert!(
+        !fake.write_ops().contains(&"set_status".to_string()),
+        "ticket status not written: {:?}",
+        fake.writes()
+    );
+    assert_eq!(after.manifests[&slice.id].status, ManifestStatus::Abandoned);
+    assert_eq!(after.active, None, "no slice active");
+    assert_eq!(after.branches, before.branches, "branch kept");
+    assert_eq!(after.worktrees, before.worktrees, "worktree kept");
+}
+
+// SLICE-6-1
+#[test]
+fn abandon_running_slice() {
+    for ticket in [T, MONDAY] {
+        let fake = Fake::new();
+        let slice = fake.with_active_slice(ticket, true);
+        let before = fake.snapshot();
+
+        let abandoned = abandon(&fake.deps()).expect("abandon");
+
+        assert_abandoned(&fake, &abandoned, &slice, &before);
+    }
+}
+
+// SLICE-6-2
+#[test]
+fn abandon_paused_slice() {
+    let fake = Fake::new();
+    let slice = fake.with_active_slice(T, false);
+    let before = fake.snapshot();
+
+    let abandoned = abandon(&fake.deps()).expect("abandon");
+
+    assert_abandoned(&fake, &abandoned, &slice, &before);
+    let ops = fake.write_ops();
+    assert!(
+        !ops.iter().any(|o| ["stop", "start", "restart"].contains(&o.as_str())),
+        "no timer touched: {ops:?}"
+    );
+}
+
+// SLICE-6-3
+#[test]
+fn nothing_to_abandon() {
+    let fake = Fake::new();
+    let before = fake.snapshot();
+
+    let err = abandon(&fake.deps()).expect_err("abandon must fail");
+
+    assert_refused(&fake, &before, &err, &SliceError::NoActiveSlice);
+}
+
+// SLICE-6-4
+#[test]
+fn abandon_mismatch() {
+    for stray in [Some(U), None] {
+        let (fake, before) = mismatched(stray);
+
+        let err = abandon(&fake.deps()).expect_err("abandon must fail");
+
+        assert!(matches!(&err, SliceError::Inconsistent(_)), "got {err:?}");
+        assert_refused(&fake, &before, &err, &err.clone());
+    }
+}
+
+// SLICE-6-5
+#[test]
+fn abandon_partial_failure() {
+    let cases = [
+        ("stop", Step::StopTimer),
+        ("write_manifest", Step::AbandonManifest),
+        ("clear_active", Step::ClearActive),
+    ];
+    for (fail, step) in cases {
+        let mut fake = Fake::new();
+        fake.with_active_slice(T, true);
+        fake.fail = Some(fail);
+        let before = fake.snapshot();
+
+        let err = abandon(&fake.deps()).expect_err("abandon must fail");
+
+        let SliceError::StepFailed {
+            step: failed,
+            undo_failures,
+            ..
+        } = &err
+        else {
+            panic!("{fail}: want StepFailed, got {err:?}")
+        };
+        assert_eq!(*failed, step, "{fail}: failed step named");
+        assert!(undo_failures.is_empty());
+        assert_ne!(err.exit_code(), 0);
+        let after = fake.snapshot();
+        assert_eq!(
+            after.entry_states(),
+            before.entry_states(),
+            "{fail}: timer running again"
+        );
+        assert_eq!(after.tickets, before.tickets, "{fail}: ticket unchanged");
+        assert_eq!(after.manifests, before.manifests, "{fail}: manifest restored");
+        assert_eq!(after.active, before.active, "{fail}: slice still active");
+    }
+}
+
+// SLICE-6-5
+#[test]
+fn abandon_partial_failure_undoes_in_reverse_order() {
+    let mut fake = Fake::new();
+    let slice = fake.with_active_slice(T, true);
+    let entry = today_entry(&fake, T);
+    fake.fail = Some("clear_active");
+
+    abandon(&fake.deps()).expect_err("abandon must fail");
+
+    assert_eq!(
+        fake.writes(),
+        [
+            format!("stop {}", entry.0),
+            format!("write_manifest {} Abandoned", slice.id.0),
+            format!("write_manifest {} Open", slice.id.0),
+            format!("restart {}", entry.0),
+        ]
+    );
+}
+
+// SLICE-6-6
+#[test]
+fn reopen_after_abandon() {
+    let fake = Fake::new();
+    let first = fake.with_active_slice(T, true);
+    abandon(&fake.deps()).expect("abandon");
+
+    let request = OpenRequest {
+        ticket: tref(T),
+        repo: first.repo.clone(),
+        branch_type: None,
+        base: None,
+    };
+    let OpenOutcome::Opened(second) = open(&fake.deps(), &request).expect("open") else {
+        panic!("want Opened")
+    };
+
+    assert_eq!(second.id, SliceId(format!("{T}-2")), "the next slice id");
+    assert_eq!(second.branch, first.branch, "the ticket's branch");
+    assert_eq!(second.worktree, first.worktree, "the ticket's worktree");
+    let after = fake.snapshot();
+    assert_eq!(after.active, Some(second.clone()));
+    assert_eq!(
+        after.manifests[&first.id].status,
+        ManifestStatus::Abandoned,
+        "old manifest kept"
+    );
+    assert_eq!(after.manifests[&second.id].status, ManifestStatus::Open);
 }
