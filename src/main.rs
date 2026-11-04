@@ -12,7 +12,7 @@ const USAGE: &str = "usage:
   slice pause [--json]
   slice resume [--json]
   slice close [--done] [--json]
-  slice abandon [--json]";
+  slice abandon [--reason TEXT] [--json]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,6 +31,7 @@ struct Flags {
     base: Option<String>,
     branch_type: Option<String>,
     done: bool,
+    reason: Option<String>,
     positional: Vec<String>,
 }
 
@@ -41,6 +42,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
         base: None,
         branch_type: None,
         done: false,
+        reason: None,
         positional: Vec::new(),
     };
     let mut it = args.iter();
@@ -52,6 +54,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             "--repo" => flags.repo = Some(PathBuf::from(value("--repo")?)),
             "--base" => flags.base = Some(value("--base")?),
             "--type" => flags.branch_type = Some(value("--type")?),
+            "--reason" => flags.reason = Some(abandon_reason(&value("--reason")?)?),
             a if a.starts_with('-') => return Err(format!("unknown flag {a}\n{USAGE}")),
             a => flags.positional.push(a.to_string()),
         }
@@ -68,6 +71,10 @@ fn run(args: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let flags = parse(rest)?;
+    // Refused before any config or state is loaded, so nothing can change.
+    if flags.reason.is_some() && command != "abandon" {
+        todo!("SLICE-7-4")
+    }
 
     let config = Config::load()?;
     let settings = config.settings();
@@ -148,16 +155,11 @@ fn run(args: &[String]) -> Result<u8, String> {
                 )
             }))
         }
-        "abandon" => Ok(print_result(abandon(&deps), flags.json, |s| {
-            (
-                "abandoned",
-                format!(
-                    "abandoned {}; {} left as it was; branch {} kept",
-                    s.id.0, s.ticket.0, s.branch
-                ),
-                s,
-            )
-        })),
+        "abandon" => {
+            let request = AbandonRequest { reason: flags.reason };
+            let result = abandon(&deps, &request).map(|a| (a.message(), a.to_json()));
+            Ok(print_outcome(result, flags.json))
+        }
         other => Err(format!("unknown command {other}\n{USAGE}")),
     }
 }
@@ -166,13 +168,6 @@ fn opt_ref(r: &Option<TicketRef>) -> String {
     r.as_ref()
         .map(|r| r.0.clone())
         .unwrap_or_else(|| "no ticket".to_string())
-}
-
-fn slice_json(s: &ActiveSlice) -> Value {
-    json!({
-        "id": s.id.0, "ticket": s.ticket.0, "repo": s.repo, "branch": s.branch,
-        "worktree": s.worktree,
-    })
 }
 
 fn error_json(e: &PortError) -> Value {
@@ -319,13 +314,20 @@ fn print_result<T>(
     as_json: bool,
     ok: impl Fn(&T) -> (&'static str, String, &ActiveSlice),
 ) -> u8 {
-    let (code, message, value) = match &result {
-        Ok(outcome) => {
-            let (name, message, slice) = ok(outcome);
-            (0, message, json!({ "outcome": name, "slice": slice_json(slice) }))
-        }
+    let result = result.map(|outcome| {
+        let (name, message, slice) = ok(&outcome);
+        (message, json!({ "outcome": name, "slice": slice_json(slice) }))
+    });
+    print_outcome(result, as_json)
+}
+
+/// Prints a command's message and JSON on success, or its error, and returns
+/// the exit code.
+fn print_outcome(result: Result<(String, Value), SliceError>, as_json: bool) -> u8 {
+    let (code, message, value) = match result {
+        Ok((message, value)) => (0, message, value),
         Err(e) => {
-            let (message, value) = describe_error(e);
+            let (message, value) = describe_error(&e);
             (e.exit_code() as u8, message, value)
         }
     };

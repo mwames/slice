@@ -229,6 +229,7 @@ pub fn parse_manifest_yaml(text: &str) -> Result<Manifest, String> {
         spec_hash: json(field("spec_hash")?)?,
         test_hash: json(field("test_hash")?)?,
         budgets,
+        abandon_reason: None,
     })
 }
 

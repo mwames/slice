@@ -175,6 +175,8 @@ pub struct Manifest {
     pub spec_hash: Option<String>,
     pub test_hash: Option<String>,
     pub budgets: Vec<(String, String)>,
+    /// Why the slice was abandoned, when a reason was given (SLICE-7).
+    pub abandon_reason: Option<String>,
 }
 
 /// A ticket status per system.
@@ -572,6 +574,7 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
             spec_hash: None,
             test_hash: None,
             budgets: Vec::new(),
+            abandon_reason: None,
         };
         deps.state
             .write_manifest(&manifest)
@@ -772,10 +775,55 @@ fn resume_active(deps: &Deps, slice: &ActiveSlice, report: &StatusReport) -> Res
     Ok(ResumeOutcome::Resumed(slice.clone()))
 }
 
-/// Stop the timer, mark the manifest abandoned and clear the active slice,
-/// without writing the ticket's status. The Harvest entry, branch and worktree
-/// stay. Returns the slice that was abandoned (SLICE-6).
-pub fn abandon(deps: &Deps) -> Result<ActiveSlice, SliceError> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbandonRequest {
+    /// Why the slice is being abandoned, already checked by [`abandon_reason`].
+    pub reason: Option<String>,
+}
+
+/// A slice that abandon ended, and the reason recorded for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Abandoned {
+    pub slice: ActiveSlice,
+    pub reason: Option<String>,
+}
+
+impl Abandoned {
+    /// The line printed without --json.
+    pub fn message(&self) -> String {
+        format!(
+            "abandoned {}; {} left as it was; branch {} kept",
+            self.slice.id.0, self.slice.ticket.0, self.slice.branch
+        )
+    }
+
+    /// The object printed with --json.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({ "outcome": "abandoned", "slice": slice_json(&self.slice) })
+    }
+}
+
+/// The value of `--reason` with surrounding whitespace removed, or an error
+/// when nothing is left (SLICE-7-3).
+pub fn abandon_reason(raw: &str) -> Result<String, String> {
+    let _ = raw;
+    todo!("SLICE-7")
+}
+
+/// A slice as `--json` output reports it.
+pub fn slice_json(s: &ActiveSlice) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id.0, "ticket": s.ticket.0, "repo": s.repo, "branch": s.branch,
+        "worktree": s.worktree,
+    })
+}
+
+/// Stop the timer, mark the manifest abandoned with the request's reason, and
+/// clear the active slice, without writing the ticket's status. The Harvest
+/// entry, branch and worktree stay, and the reason goes nowhere but the
+/// manifest (SLICE-6, SLICE-7).
+pub fn abandon(deps: &Deps, request: &AbandonRequest) -> Result<Abandoned, SliceError> {
+    let _ = request;
     let (slice, report) = active_slice(deps)?;
     let manifest = match deps.state.read_manifest(&slice.id) {
         Ok(Some(manifest)) => manifest,
@@ -810,7 +858,7 @@ pub fn abandon(deps: &Deps) -> Result<ActiveSlice, SliceError> {
     })();
 
     match result {
-        Ok(()) => Ok(slice),
+        Ok(()) => Ok(Abandoned { slice, reason: None }),
         Err((step, error)) => Err(SliceError::StepFailed {
             step,
             error,
