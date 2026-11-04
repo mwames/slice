@@ -2,14 +2,17 @@
 # Builds the Rust agent image for this repository's Cargo.lock.
 #
 # Dependencies are vendored here, on the host, with your own git credentials;
-# the image build only copies them in. The tag carries a hash of Cargo.lock,
-# so a changed lockfile gets a new image instead of a stale one.
+# the image build only copies them in. The tag hashes everything the image is
+# built from, so a changed lockfile, Containerfile or Claude Code version gets
+# a new image instead of a stale one.
 set -euo pipefail
 
 claude_version=2.1.291
 
 repo=$(git rev-parse --show-toplevel)
-tag="slice-rust:$(shasum -a 256 "$repo/Cargo.lock" | cut -c1-12)"
+hash=$( (cat "$repo/Cargo.lock" "$repo/agents/rust/Containerfile"; echo "$claude_version") \
+  | shasum -a 256 | cut -c1-12)
+tag="slice-rust:$hash"
 
 ctx=$(mktemp -d)
 trap 'rm -rf "$ctx"' EXIT

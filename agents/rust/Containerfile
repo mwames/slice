@@ -5,7 +5,8 @@ FROM docker.io/library/rust:1.87.0-slim-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup component add rustfmt clippy
 
 # Claude Code refuses to skip permission prompts as root, so the agent is an
 # ordinary user. Cargo's home and the shared target directory are its own.
