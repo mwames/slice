@@ -1,0 +1,41 @@
+# The Rust image an agent runs in. Built by agents/build-rust-image.sh, which
+# vendors the dependencies on the host first: nothing here fetches a crate, and
+# the build never holds a GitHub credential.
+FROM docker.io/library/rust:1.87.0-slim-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Claude Code refuses to skip permission prompts as root, so the agent is an
+# ordinary user. Cargo's home and the shared target directory are its own.
+RUN useradd --create-home --uid 1000 agent \
+ && mkdir /opt/target \
+ && chown -R agent /usr/local/cargo /opt/target
+
+# Vendored files keep their host permissions, some of them owner-only.
+COPY vendor /opt/vendor
+RUN chmod -R a+rX /opt/vendor
+COPY cargo-config.toml /usr/local/cargo/config.toml
+
+USER agent
+ARG CLAUDE_VERSION
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_VERSION"
+ENV PATH="/home/agent/.local/bin:$PATH"
+
+# Compile every dependency, dev-dependencies included, against stand-in
+# sources, so a run only compiles the repository's own code. The stand-in
+# itself is then cleaned out: an exported workspace's files carry their commit
+# times, so Cargo would otherwise think the stand-in is newer and reuse it.
+ENV CARGO_TARGET_DIR=/opt/target
+COPY --chown=agent Cargo.toml Cargo.lock /tmp/prebuild/
+RUN cd /tmp/prebuild \
+ && mkdir src \
+ && echo 'fn main() {}' > src/main.rs \
+ && touch src/lib.rs \
+ && cargo test --offline --locked --no-run \
+ && cargo clean --offline --package slice \
+ && cd / && rm -rf /tmp/prebuild
+
+ENV CARGO_NET_OFFLINE=true
+WORKDIR /work
