@@ -1,0 +1,4 @@
+[net]
+# worktools is a private GitHub repository. The git CLI fetches it with your
+# own credentials; Cargo's built-in client can't read them.
+git-fetch-with-cli = true
