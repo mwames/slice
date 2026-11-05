@@ -245,7 +245,7 @@ proptest! {
         let fake = s.build();
         let before = fake.snapshot();
 
-        let result = abandon(&fake.deps());
+        let result = abandon(&fake.deps(), &AbandonRequest { reason: None });
 
         let after = fake.snapshot();
         prop_assert!(!fake.write_ops().contains(&"set_status".to_string()), "ticket status written");
@@ -254,6 +254,37 @@ proptest! {
             prop_assert_eq!(&after.active, &before.active, "slice still active");
             prop_assert_eq!(after.entry_states(), before.entry_states(), "timer running state");
             prop_assert_eq!(&after.manifests, &before.manifests, "manifest");
+        }
+    }
+
+    // invariant: SLICE-7-I1
+    #[test]
+    fn abandon_reason_stays_local(
+        s in start(),
+        reason in prop::sample::select(vec!["fixed by ENG-14800", "product retired", "duplicate of ENG-2: see notes"]),
+    ) {
+        let fake = s.build();
+        let before = fake.snapshot();
+        let request = AbandonRequest { reason: Some(reason.to_string()) };
+
+        let _ = abandon(&fake.deps(), &request);
+
+        let after = fake.snapshot();
+        prop_assert_eq!(&after.tickets, &before.tickets, "tickets unchanged");
+        for (id, e) in &after.entries {
+            prop_assert!(!e.notes.contains(reason), "entry {} notes: {:?}", id, e.notes);
+            if let Some(old) = before.entries.get(id) {
+                prop_assert_eq!(&e.notes, &old.notes, "entry {} notes changed", id);
+            }
+        }
+        for write in fake.writes() {
+            prop_assert!(!write.contains(reason), "reason written: {}", write);
+        }
+        let slice = before.active.as_ref().map(|a| a.id.clone());
+        for (id, m) in &after.manifests {
+            if Some(id) != slice.as_ref() {
+                prop_assert_eq!(Some(m), before.manifests.get(id), "manifest {} changed", &id.0);
+            }
         }
     }
 }

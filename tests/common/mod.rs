@@ -227,6 +227,7 @@ impl Fake {
                 spec_hash: None,
                 test_hash: None,
                 budgets: vec![],
+                abandon_reason: None,
             },
         );
         w.slice_counts.insert(ticket.to_string(), 1);

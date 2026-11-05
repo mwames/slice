@@ -582,3 +582,94 @@ requirements:
           status is written, and when it exits non-zero the slice is still
           active and its timer's running state and manifest are what they
           were before the run.
+
+  - id: SLICE-7
+    title: Abandon Reason
+    description: >
+      slice abandon --reason "<text>" records why a slice was abandoned in
+      its manifest and reports it. The reason is optional: without it,
+      abandon works exactly as before and the manifest records no reason.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-04
+    rationale: >
+      An abandoned manifest says that the work stopped but not why, and the
+      why is what a later look back, or an orchestrator deciding whether to
+      retry, needs. The reason stays in local state: SLICE-6 leaves the
+      ticket to a person, and a reason posted to the ticket would undo that.
+      It's optional so abandoning in a hurry stays one command. Manifests
+      written before this change must still read back.
+    superseded_by:
+    out_of_scope:
+      - Posting the reason to the ticket or to Harvest
+      - Requiring a reason
+      - Reasons for close, pause or resume
+      - Editing the reason after the slice is abandoned
+      - Listing or searching past reasons
+    acceptance_criteria:
+      - id: SLICE-7-1
+        title: Reason Recorded
+        status: active
+        description: >
+          Given an active slice for ticket T,
+          when slice abandon --reason "  fixed by ENG-14800  " is run,
+          then it completes as in SLICE-6-1, the manifest's abandon reason
+          is "fixed by ENG-14800" with the surrounding whitespace removed,
+          the printed line includes the reason, and with --json the output
+          has a reason field holding it.
+
+      - id: SLICE-7-2
+        title: No Reason
+        status: active
+        description: >
+          Given an active slice,
+          when slice abandon is run without --reason,
+          then it completes as in SLICE-6-1, the manifest records no
+          reason, and with --json the reason field is null.
+
+      - id: SLICE-7-3
+        title: Empty Reason
+        status: active
+        description: >
+          Given an active slice,
+          when slice abandon is run with --reason followed by an empty or
+          all-whitespace value, or with --reason as the last argument,
+          then it prints a usage error, changes nothing, and exits 2.
+
+      - id: SLICE-7-4
+        title: Reason Only On Abandon
+        status: active
+        description: >
+          Given any command other than abandon,
+          when it is run with --reason,
+          then it prints a usage error, changes nothing, and exits 2.
+
+      - id: SLICE-7-5
+        title: Older Manifests
+        status: active
+        description: >
+          Given a manifest written before this change, with no abandon
+          reason line,
+          when it is read,
+          then it reads back with no reason and every other field as written.
+
+      - id: SLICE-7-6
+        title: Reason Round Trip
+        status: active
+        description: >
+          Given a reason containing quotes, colons, a backslash, a newline
+          and non-ASCII text,
+          when the manifest is written and read back,
+          then the reason is exactly what was written.
+
+    invariants:
+      - id: SLICE-7-I1
+        title: Reason Stays Local
+        status: active
+        description: >
+          For every run of slice abandon with a reason, successful or not,
+          the reason is written only to the slice's manifest: never to the
+          ticket, and never to a Harvest entry's notes.

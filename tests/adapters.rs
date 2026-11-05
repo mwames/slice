@@ -61,6 +61,7 @@ fn manifest() -> Manifest {
         spec_hash: None,
         test_hash: None,
         budgets: vec![],
+        abandon_reason: None,
     }
 }
 
@@ -303,4 +304,72 @@ fn config_defaults_and_overrides() {
         Config::parse("branch_prefix = \"s/\"").is_err(),
         "removed and unknown keys are rejected"
     );
+}
+
+/// A manifest as slice wrote it before SLICE-7, with no abandon reason line.
+const OLDER_MANIFEST: &str = "id: \"ENG-1-2\"
+ticket: \"ENG-1\"
+ticket_system: clickup
+branch: \"feature/20261102-ENG-1-login\"
+base_commit: \"abc1234\"
+status: abandoned
+acceptance_criteria: [\"ENG-1-1\",\"ENG-1-2\"]
+invariants: [\"ENG-1-I1\"]
+spec_hash: \"s123\"
+test_hash: null
+budgets:
+  \"tokens\": \"100k\"
+";
+
+// SLICE-7-5
+#[test]
+fn older_manifest_reads_back_without_a_reason() {
+    let dir = temp_dir("older-manifest");
+    let state = FileState::new(dir.join("state"));
+    std::fs::create_dir_all(dir.join("state/manifests")).unwrap();
+    std::fs::write(dir.join("state/manifests/ENG-1-2.yaml"), OLDER_MANIFEST).unwrap();
+
+    let read = state.read_manifest(&SliceId("ENG-1-2".into())).unwrap();
+
+    assert_eq!(
+        read,
+        Some(Manifest {
+            id: SliceId("ENG-1-2".into()),
+            status: ManifestStatus::Abandoned,
+            acceptance_criteria: vec!["ENG-1-1".into(), "ENG-1-2".into()],
+            invariants: vec!["ENG-1-I1".into()],
+            spec_hash: Some("s123".into()),
+            budgets: vec![("tokens".into(), "100k".into())],
+            abandon_reason: None,
+            ..manifest()
+        })
+    );
+}
+
+// SLICE-7-6
+#[test]
+fn abandon_reason_round_trips_through_the_manifest() {
+    let dir = temp_dir("reason");
+    let state = FileState::new(dir.join("state"));
+    let reasons = [
+        "said \"won't fix\"",
+        "fixed by: ENG-14800",
+        "path C:\\work\\app",
+        "first line\nsecond line",
+        "déjà vu — 修正済み ✓",
+        "a \"quoted\": C:\\x\\\"y\"\nstatus: closed\nbudgets: café 🚧",
+    ];
+    for reason in reasons {
+        let abandoned = Manifest {
+            status: ManifestStatus::Abandoned,
+            abandon_reason: Some(reason.to_string()),
+            ..manifest()
+        };
+
+        state.write_manifest(&abandoned).unwrap();
+        let read = state.read_manifest(&abandoned.id).unwrap().expect("manifest");
+
+        assert_eq!(read.abandon_reason.as_deref(), Some(reason), "{reason:?}");
+        assert_eq!(read, abandoned, "{reason:?}: every field as written");
+    }
 }

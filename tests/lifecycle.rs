@@ -372,9 +372,9 @@ fn abandon_running_slice() {
         let slice = fake.with_active_slice(ticket, true);
         let before = fake.snapshot();
 
-        let abandoned = abandon(&fake.deps()).expect("abandon");
+        let abandoned = abandon(&fake.deps(), &AbandonRequest { reason: None }).expect("abandon");
 
-        assert_abandoned(&fake, &abandoned, &slice, &before);
+        assert_abandoned(&fake, &abandoned.slice, &slice, &before);
     }
 }
 
@@ -385,9 +385,9 @@ fn abandon_paused_slice() {
     let slice = fake.with_active_slice(T, false);
     let before = fake.snapshot();
 
-    let abandoned = abandon(&fake.deps()).expect("abandon");
+    let abandoned = abandon(&fake.deps(), &AbandonRequest { reason: None }).expect("abandon");
 
-    assert_abandoned(&fake, &abandoned, &slice, &before);
+    assert_abandoned(&fake, &abandoned.slice, &slice, &before);
     let ops = fake.write_ops();
     assert!(
         !ops.iter().any(|o| ["stop", "start", "restart"].contains(&o.as_str())),
@@ -401,7 +401,7 @@ fn nothing_to_abandon() {
     let fake = Fake::new();
     let before = fake.snapshot();
 
-    let err = abandon(&fake.deps()).expect_err("abandon must fail");
+    let err = abandon(&fake.deps(), &AbandonRequest { reason: None }).expect_err("abandon must fail");
 
     assert_refused(&fake, &before, &err, &SliceError::NoActiveSlice);
 }
@@ -412,7 +412,7 @@ fn abandon_mismatch() {
     for stray in [Some(U), None] {
         let (fake, before) = mismatched(stray);
 
-        let err = abandon(&fake.deps()).expect_err("abandon must fail");
+        let err = abandon(&fake.deps(), &AbandonRequest { reason: None }).expect_err("abandon must fail");
 
         assert!(matches!(&err, SliceError::Inconsistent(_)), "got {err:?}");
         assert_refused(&fake, &before, &err, &err.clone());
@@ -433,7 +433,7 @@ fn abandon_partial_failure() {
         fake.fail = Some(fail);
         let before = fake.snapshot();
 
-        let err = abandon(&fake.deps()).expect_err("abandon must fail");
+        let err = abandon(&fake.deps(), &AbandonRequest { reason: None }).expect_err("abandon must fail");
 
         let SliceError::StepFailed {
             step: failed,
@@ -466,7 +466,7 @@ fn abandon_partial_failure_undoes_in_reverse_order() {
     let entry = today_entry(&fake, T);
     fake.fail = Some("clear_active");
 
-    abandon(&fake.deps()).expect_err("abandon must fail");
+    abandon(&fake.deps(), &AbandonRequest { reason: None }).expect_err("abandon must fail");
 
     assert_eq!(
         fake.writes(),
@@ -484,7 +484,7 @@ fn abandon_partial_failure_undoes_in_reverse_order() {
 fn reopen_after_abandon() {
     let fake = Fake::new();
     let first = fake.with_active_slice(T, true);
-    abandon(&fake.deps()).expect("abandon");
+    abandon(&fake.deps(), &AbandonRequest { reason: None }).expect("abandon");
 
     let request = OpenRequest {
         ticket: tref(T),
@@ -507,4 +507,76 @@ fn reopen_after_abandon() {
         "old manifest kept"
     );
     assert_eq!(after.manifests[&second.id].status, ManifestStatus::Open);
+}
+
+// ---------------------------------------------------------------------------
+// abandon --reason
+// ---------------------------------------------------------------------------
+
+// SLICE-7-1
+#[test]
+fn abandon_records_the_trimmed_reason() {
+    let reason = abandon_reason("  fixed by ENG-14800  ").expect("a reason");
+    assert_eq!(reason, "fixed by ENG-14800", "surrounding whitespace removed");
+
+    for running in [true, false] {
+        let fake = Fake::new();
+        let slice = fake.with_active_slice(T, running);
+        let before = fake.snapshot();
+        let request = AbandonRequest {
+            reason: Some(reason.clone()),
+        };
+
+        let abandoned = abandon(&fake.deps(), &request).expect("abandon");
+
+        assert_abandoned(&fake, &abandoned.slice, &slice, &before);
+        assert_eq!(abandoned.reason.as_deref(), Some("fixed by ENG-14800"));
+        let manifest = &fake.snapshot().manifests[&slice.id];
+        assert_eq!(manifest.abandon_reason.as_deref(), Some("fixed by ENG-14800"));
+        assert_eq!(
+            Manifest {
+                abandon_reason: None,
+                status: ManifestStatus::Open,
+                ..manifest.clone()
+            },
+            before.manifests[&slice.id],
+            "the manifest is otherwise as it was"
+        );
+        assert!(
+            abandoned.message().contains("fixed by ENG-14800"),
+            "printed line includes the reason: {}",
+            abandoned.message()
+        );
+        let json = abandoned.to_json();
+        assert_eq!(json["reason"], "fixed by ENG-14800", "json: {json}");
+        assert_eq!(json["outcome"], "abandoned", "json: {json}");
+        assert_eq!(json["slice"], slice_json(&slice), "json: {json}");
+    }
+}
+
+// SLICE-7-2
+#[test]
+fn abandon_without_reason_records_none() {
+    let fake = Fake::new();
+    let slice = fake.with_active_slice(T, true);
+    let before = fake.snapshot();
+
+    let abandoned = abandon(&fake.deps(), &AbandonRequest { reason: None }).expect("abandon");
+
+    assert_abandoned(&fake, &abandoned.slice, &slice, &before);
+    assert_eq!(abandoned.reason, None);
+    assert_eq!(fake.snapshot().manifests[&slice.id].abandon_reason, None);
+    let json = abandoned.to_json();
+    let object = json.as_object().expect("a JSON object");
+    assert_eq!(object.get("reason"), Some(&serde_json::Value::Null), "json: {json}");
+    assert_eq!(json["outcome"], "abandoned", "json: {json}");
+    assert_eq!(json["slice"], slice_json(&slice), "json: {json}");
+}
+
+// SLICE-7-3
+#[test]
+fn empty_reason_refused() {
+    for raw in ["", " ", "   ", "\t", "\n", " \t\r\n "] {
+        assert!(abandon_reason(raw).is_err(), "{raw:?} refused");
+    }
 }
