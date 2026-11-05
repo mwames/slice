@@ -1,6 +1,6 @@
 # Isolated agents: design
 
-Status: draft, 2026-11-03. This turns Phases 1 and 2 of *Spec-Driven Agent
+Status: Phase 1 done, 2026-11-05; see "Phase 1 results". This turns Phases 1 and 2 of *Spec-Driven Agent
 Pipeline — Conceptual Design* into something buildable. The conceptual design
 says what and why; this says how, on this machine, with these tools.
 
@@ -31,9 +31,9 @@ friction. Phase 2 automates what Phase 1 shows is worth automating, as
 
 | | Test agent | Implementation agent |
 | --- | --- | --- |
-| Reads | The slice's spec, the interface stub, existing tests | The slice's spec, the interface stub, the tests (read-only), the rest of the source |
+| Reads | The slice's spec, existing tests, and the source at the stub commit, which holds no implementation of the slice | The slice's spec, the interface stub, the tests (read-only), the rest of the source |
 | Writes | Test paths only | Source paths only |
-| Never has | Any implementation beyond the stub | Write access to tests or `.spool/` |
+| Never has | Any implementation of the slice | Write access to tests or `.spool/` |
 | Done when | The tests compile, fail against the stub, and Spool shows every slice ID covered | The tests pass, unchanged |
 
 "Source paths" and "test paths" are per repository. A repository declares them
@@ -54,15 +54,19 @@ host.
 
 The launcher never mounts the repository. For each run it:
 
-1. Exports the base commit's allowed paths into a fresh directory with
-   `git archive <base> -- <paths>`. For the test agent that means the spec,
-   the stub file(s), existing tests and shared files, but no other source.
-2. Makes that directory a throwaway git repository and commits it as
-   "baseline", so the agent's changes can be read back as a diff.
-3. Mounts it at `/work`. For the implementation agent, the test and spec paths
-   are bind-mounted again on top, read-only (`:ro`). A write to them fails at
-   the filesystem, whatever the agent tries.
-4. After the run, takes `git diff baseline` in the workspace as the patch.
+1. Exports the base commit into a fresh directory with `git archive <base>`.
+   For the test agent the base is the stub commit: its tests have to compile
+   against the crate, and at that commit the crate holds no implementation of
+   the slice. For the implementation agent it's the tests commit.
+2. Records that directory as "baseline" in a throwaway git repository whose
+   `.git` lives beside it, outside the container, so the agent's changes can
+   be read back as a diff and the agent can't rewrite the baseline.
+3. Mounts it read-only at `/work`, then mounts the role's write paths again on
+   top, writable: `tests/` for the test agent, `src/` for the implementation
+   agent. A write anywhere else fails at the filesystem, whatever the agent
+   tries.
+4. After the run, takes the diff against baseline, untracked files included,
+   as the patch.
    A patch that touches a path outside the role's write list is rejected
    before anything reaches the host repository.
 
@@ -214,3 +218,92 @@ These are Phase 2. In Phase 1 they're done by hand.
    how each run ended and whether it was going in circles before it did. That
    list decides what `slice run` does first and sets the churn guard's
    thresholds.
+
+## Phase 1 results
+
+Run on 2026-11-04 for SLICE-7 (`slice abandon --reason`). Both agents
+finished `green`, with no questions, and every check passed again on the host.
+
+| | Test agent | Implementation agent |
+| --- | --- | --- |
+| Model | `opus` | `sonnet` |
+| Time | 2 min 41 s | 42 s |
+| Turns | 22 | 19 |
+| Reported cost | $1.21 | $0.23 |
+| Patch | 311 lines, `tests/` only | 28 lines, `src/` only |
+| Outcome | 6 new tests failing against the stub, 3 passing for declared reasons | All 83 tests passing, clippy and fmt clean |
+
+Neither run went in circles, and neither came near the timeout, so there's no
+data yet for the churn guard's thresholds.
+
+### Manual steps, in order
+
+What `slice run` and `slice verify` have to automate:
+
+1. Build a Linux Spool for the container's architecture.
+2. Export the workspace and record its baseline.
+3. Write the role's prompt, task and report schema.
+4. Run the container: the workspace mounts, the token's env file, the model
+   for the role, and a timeout.
+5. Read the report from the JSON output.
+6. Take the patch and check that it touches only the role's write paths.
+7. Apply it to the branch with `git apply --index`.
+8. On the host: `cargo fmt --check`, `cargo clippy --all-targets`,
+   `spool check`, and `cargo test --no-fail-fast`. For the test agent, also
+   check which new tests fail against the stub.
+9. Show the diff, and commit once it's approved.
+
+### What went wrong, and what changed
+
+- **The test agent needs the whole crate.** Rust tests don't compile without
+  the source, so its workspace is the whole tree at the stub commit. The
+  Roles table and "Building a workspace" now say so.
+- **Per-path read-only mounts were the wrong way round.** Mounting the
+  workspace read-only with one writable path on top is simpler and fails
+  closed. "Building a workspace" now says so.
+- **Full model IDs weren't recognized** by Claude Code 2.1.291. The aliases
+  `opus` and `sonnet` worked.
+- **`--append-system-prompt-file` isn't in this version's help**, so the prompt
+  is passed inline. `--json-schema` takes the schema itself, not a path.
+- **The image needed four fixes:**
+  - `cargo vendor --quiet` also drops the source-replacement config it prints.
+  - Vendored files kept owner-only permissions from the host.
+  - The stand-in crate used to pre-build dependencies looked newer than the
+    exported files, which carry their commit times, so Cargo reused it. The
+    image now cleans it out.
+  - It had no `rustfmt` or `clippy`, so the test agent couldn't check its own
+    formatting.
+
+  The tag now hashes `Cargo.lock`, the Containerfile and the Claude Code
+  version, because a Containerfile change used to keep the old tag.
+- **File ownership was fine without `--userns=keep-id`.** Podman's file
+  sharing on macOS returns the agent's files owned by you. Files the agent
+  edited came back owner-only (`0600`), which git doesn't record.
+- **Some tests can't fail against a stub.** Behavior that already exists
+  before the slice (here, reading older manifests, and the reason never
+  leaking because the stub drops it) passes from the start. The test agent
+  declared each one in `assumptions`. `slice verify` should accept a passing
+  new test only when the report declares it.
+- **Output has to be testable.** ACs about printed output need that output
+  built in the library, not in `main.rs`, so the stub moved it there. That's
+  worth doing in every stub.
+- **Command-line tests need an isolated home.** The test agent ran the binary
+  with a cleared environment, temporary `HOME` and XDG directories, and a
+  broken config file, so a run that got past the argument checks couldn't
+  reach Harvest or a ticket system. Its temporary directories aren't cleaned
+  up yet.
+- **Spool doesn't track invariants.** The test agent used the repository's
+  `// invariant:` convention, which `spool check` ignores.
+- **The token can leak through the editor.** Selecting the token file's line
+  in the editor sent it into the conversation. The token now lives at
+  `~/.config/slice/agent.env`, mode 600, outside every repository.
+
+### What `slice run` does first
+
+1. Steps 1 to 7 above for one role: export, mounts, role files from
+   templates, the run, the path check, and apply.
+2. `slice verify`: step 8, including the check of which tests fail against
+   the stub, with declared exceptions.
+3. The churn guard, which watches the run through `--output-format
+   stream-json`. Thresholds wait until a run actually goes in circles.
+4. The network allow-list proxy. Phase 1 used ordinary networking.
