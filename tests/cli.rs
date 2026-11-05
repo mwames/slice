@@ -12,7 +12,28 @@ use slice::ports::*;
 /// A fresh home with an active slice and its manifest in local state, and a
 /// config file that fails to load, so a run that gets past argument checks
 /// stops there rather than reaching Harvest or a ticket system.
-fn home(name: &str) -> PathBuf {
+/// A temporary directory, deleted with everything under it when it goes out
+/// of scope, even when the test fails. Derefs to `path`, which may be a
+/// subdirectory of the root that gets deleted.
+struct TempDir {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn home(name: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!("slice-cli-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("config/slice")).unwrap();
@@ -44,7 +65,10 @@ fn home(name: &str) -> PathBuf {
             abandon_reason: None,
         })
         .unwrap();
-    dir
+    TempDir {
+        root: dir.clone(),
+        path: dir,
+    }
 }
 
 fn slice(home: &Path, args: &[&str]) -> Output {

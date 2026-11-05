@@ -10,11 +10,35 @@ use slice::adapters::state::{FileState, manifest_yaml};
 use slice::config::Config;
 use slice::ports::*;
 
-fn temp_dir(name: &str) -> PathBuf {
+/// A temporary directory, deleted with everything under it when it goes out
+/// of scope, even when the test fails. Derefs to `path`, which may be a
+/// subdirectory of the root that gets deleted.
+struct TempDir {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn temp_dir(name: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!("slice-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    TempDir {
+        root: dir.clone(),
+        path: dir,
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -27,9 +51,12 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-fn repo(name: &str) -> PathBuf {
-    let dir = temp_dir(name).join("app");
-    std::fs::create_dir_all(&dir).unwrap();
+/// A git repository with one empty commit, at `app` inside a temporary root
+/// that also holds its worktrees.
+fn repo(name: &str) -> TempDir {
+    let mut dir = temp_dir(name);
+    dir.path = dir.path.join("app");
+    std::fs::create_dir_all(&*dir).unwrap();
     git(&dir, &["init", "-q", "-b", "main"]);
     git(
         &dir,
@@ -221,7 +248,7 @@ fn state_reports_a_corrupt_file_as_local_state() {
     let dir = temp_dir("corrupt");
     std::fs::write(dir.join("active.json"), "not json").unwrap();
 
-    let err = FileState::new(dir).active().unwrap_err();
+    let err = FileState::new(dir.to_path_buf()).active().unwrap_err();
 
     assert_eq!(err.source, Source::LocalState);
 }
