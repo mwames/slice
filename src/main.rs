@@ -73,7 +73,7 @@ fn run(args: &[String]) -> Result<u8, String> {
     let flags = parse(rest)?;
     // Refused before any config or state is loaded, so nothing can change.
     if flags.reason.is_some() && command != "abandon" {
-        todo!("SLICE-7-4")
+        return Err(format!("--reason is only for abandon\n{USAGE}"));
     }
 
     let config = Config::load()?;

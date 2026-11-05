@@ -175,8 +175,14 @@ pub fn manifest_yaml(m: &Manifest) -> String {
             .map(|(k, v)| format!("\n  {}: {}", q(k), q(v)))
             .collect()
     };
+    // Written only when there is one, so manifests without a reason are unchanged.
+    let reason = m
+        .abandon_reason
+        .as_deref()
+        .map(|r| format!("abandon_reason: {}\n", q(r)))
+        .unwrap_or_default();
     format!(
-        "id: {}\nticket: {}\nticket_system: {system}\nbranch: {}\nbase_commit: {}\nstatus: {status}\nacceptance_criteria: {}\ninvariants: {}\nspec_hash: {}\ntest_hash: {}\nbudgets:{budgets}\n",
+        "id: {}\nticket: {}\nticket_system: {system}\nbranch: {}\nbase_commit: {}\nstatus: {status}\nacceptance_criteria: {}\ninvariants: {}\nspec_hash: {}\ntest_hash: {}\nbudgets:{budgets}\n{reason}",
         q(&m.id.0),
         q(&m.ticket.0),
         q(&m.branch),
@@ -229,7 +235,7 @@ pub fn parse_manifest_yaml(text: &str) -> Result<Manifest, String> {
         spec_hash: json(field("spec_hash")?)?,
         test_hash: json(field("test_hash")?)?,
         budgets,
-        abandon_reason: None,
+        abandon_reason: fields.get("abandon_reason").map(|v| json(v)).transpose()?,
     })
 }
 

@@ -791,23 +791,32 @@ pub struct Abandoned {
 impl Abandoned {
     /// The line printed without --json.
     pub fn message(&self) -> String {
-        format!(
+        let line = format!(
             "abandoned {}; {} left as it was; branch {} kept",
             self.slice.id.0, self.slice.ticket.0, self.slice.branch
-        )
+        );
+        match &self.reason {
+            Some(reason) => format!("{line}; reason: {reason}"),
+            None => line,
+        }
     }
 
     /// The object printed with --json.
     pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({ "outcome": "abandoned", "slice": slice_json(&self.slice) })
+        serde_json::json!({
+            "outcome": "abandoned", "slice": slice_json(&self.slice), "reason": self.reason,
+        })
     }
 }
 
 /// The value of `--reason` with surrounding whitespace removed, or an error
 /// when nothing is left (SLICE-7-3).
 pub fn abandon_reason(raw: &str) -> Result<String, String> {
-    let _ = raw;
-    todo!("SLICE-7")
+    let reason = raw.trim();
+    if reason.is_empty() {
+        return Err("--reason needs a non-empty value".to_string());
+    }
+    Ok(reason.to_string())
 }
 
 /// A slice as `--json` output reports it.
@@ -823,7 +832,6 @@ pub fn slice_json(s: &ActiveSlice) -> serde_json::Value {
 /// entry, branch and worktree stay, and the reason goes nowhere but the
 /// manifest (SLICE-6, SLICE-7).
 pub fn abandon(deps: &Deps, request: &AbandonRequest) -> Result<Abandoned, SliceError> {
-    let _ = request;
     let (slice, report) = active_slice(deps)?;
     let manifest = match deps.state.read_manifest(&slice.id) {
         Ok(Some(manifest)) => manifest,
@@ -847,6 +855,7 @@ pub fn abandon(deps: &Deps, request: &AbandonRequest) -> Result<Abandoned, Slice
 
         let abandoned = Manifest {
             status: ManifestStatus::Abandoned,
+            abandon_reason: request.reason.clone(),
             ..manifest.clone()
         };
         deps.state
@@ -858,7 +867,10 @@ pub fn abandon(deps: &Deps, request: &AbandonRequest) -> Result<Abandoned, Slice
     })();
 
     match result {
-        Ok(()) => Ok(Abandoned { slice, reason: None }),
+        Ok(()) => Ok(Abandoned {
+            slice,
+            reason: request.reason.clone(),
+        }),
         Err((step, error)) => Err(SliceError::StepFailed {
             step,
             error,
