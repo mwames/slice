@@ -1,0 +1,28 @@
+# The Go image an agent runs in. Built by agents/build-go-image.sh, which
+# downloads the target repository's modules on the host first: nothing here
+# fetches a module, and the build never holds a credential.
+FROM docker.io/library/golang:1.25.5-bookworm
+
+# Claude Code refuses to skip permission prompts as root, so the agent is an
+# ordinary user, owning its own module and build caches.
+RUN useradd --create-home --uid 1000 agent
+USER agent
+ENV GOPATH=/home/agent/go \
+    GOCACHE=/home/agent/.cache/go-build \
+    GOTOOLCHAIN=local
+
+ARG CLAUDE_VERSION
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_VERSION"
+ENV PATH="/home/agent/.local/bin:/home/agent/go/bin:$PATH"
+
+# The modules downloaded on the host. Module cache files are read-only by
+# design, so only the directories need to be the agent's.
+COPY --chown=agent modcache /home/agent/go/pkg/mod
+
+# Compile the standard library once, so a run only compiles the repository
+# and its modules.
+RUN go build std
+
+# No module can be fetched at run time: a missing one fails fast.
+ENV GOPROXY=off GOFLAGS=-mod=readonly
+WORKDIR /work
