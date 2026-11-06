@@ -65,6 +65,15 @@ The launcher never mounts the repository. For each run it:
    top, writable: `tests/` for the test agent, `src/` for the implementation
    agent. A write anywhere else fails at the filesystem, whatever the agent
    tries.
+
+   Go keeps each test beside the code it tests, so there's no subtree to
+   mount writable. There the workspace is writable, and every tracked file
+   the role mustn't write is mounted read-only on top, one mount per file,
+   generated from `git ls-files`: every non-test file for the test agent,
+   and every `_test.go` file plus the spec and module files for the
+   implementation agent. Existing files still fail closed. A new file of the
+   wrong kind can be created, so the path check after the run is what
+   rejects it.
 4. After the run, takes the diff against baseline, untracked files included,
    as the patch.
    A patch that touches a path outside the role's write list is rejected
@@ -112,6 +121,14 @@ needs no package registry:
   credential, even though worktools is private. `CARGO_NET_OFFLINE=true` is
   set at run time, so a missing crate fails fast instead of reaching the
   network.
+- **Go:** `golang:<pinned>-bookworm`, plus the Claude Code CLI at a pinned
+  version, running as an unprivileged user. Modules are downloaded on the
+  host into a module cache that's copied into the image, so, as for Rust,
+  neither the build nor a run holds a credential. `GOPROXY=off`,
+  `GOFLAGS=-mod=readonly` and `GOTOOLCHAIN=local` keep a run offline and on
+  the image's toolchain, and the standard library is pre-built. The tag
+  hashes `go.mod`, `go.sum`, the Containerfile and the Claude Code version.
+  `agents/build-go-image.sh` builds it.
 - **Node** (provision-web and similar), later: `node:<.nvmrc>-slim`, `npm ci`
   at build time.
 
@@ -293,14 +310,54 @@ What `slice run` and `slice verify` have to automate:
   reach Harvest or a ticket system. Its temporary directories aren't cleaned
   up yet.
 - **Spool doesn't track invariants.** The test agent used the repository's
-  `// invariant:` convention, which `spool check` ignores.
+  `// invariant:` convention, which `spool check` ignores. Fixed since:
+  Spool tracks invariants (INVARIANT-1, built in the Go runs below), and
+  slice's invariants use `SLICE-<n>-INV-<n>` IDs, so a missing invariant
+  test fails `spool check`.
 - **The token can leak through the editor.** Selecting the token file's line
   in the editor sent it into the conversation. The token now lives at
   `~/.config/slice/agent.env`, mode 600, outside every repository.
 
-### What `slice run` does first
+## Go runs
 
-1. Steps 1 to 7 above for one role: export, mounts, role files from
+Run on 2026-11-05 and 2026-11-06 against Spool, in the Go image: INVARIANT-1
+(Spool tracks invariants like ACs) and INVARIANT-2 (editor support for them).
+All four runs finished `green`, with no questions, and every check passed
+again on the host.
+
+| | INVARIANT-1 tests | INVARIANT-1 code | INVARIANT-2 tests | INVARIANT-2 code |
+| --- | --- | --- | --- | --- |
+| Model | `opus` | `sonnet` | `opus` | `sonnet` |
+| Time | 4 min 52 s | 40 s | 2 min 37 s | 36 s |
+| Turns | 19 | 8 | 16 | 7 |
+| Reported cost | $1.80 | $0.29 | $1.13 | $0.25 |
+| Patch | 918 lines, 8 test files | 174 lines, 10 files | 719 lines, 1 test file | 147 lines, 5 files |
+| Outcome | 22 tests failing against the stub, 6 passing as declared | All tests passing | 16 failing, 4 passing as declared | All tests passing |
+
+Again nothing went in circles. The test agent is where the time and money go:
+four to six times the implementation agent's cost, scaling with how many
+packages a slice touches.
+
+What was new:
+
+- **Go needs a read-only mount per file.** See "Building a workspace". 44
+  and 46 mounts worked without trouble, so `slice run` should generate them
+  from the repository's path globs rather than expect a writable subtree.
+- **An existing test can pin behavior the spec changes.** A test comparing
+  every severity default had to learn the new one, and the implementation
+  agent couldn't have edited it. The test agent updated it, annotated it and
+  declared it. The role prompt now allows exactly that, and `slice verify`
+  should accept a changed existing test only when the report declares it.
+- **The workspace has no git history.** It's a `git archive` export, so the
+  task can't say "the last two commits"; it has to name the files.
+- **Formatting debt collides with the formatting check.** One file wasn't
+  `gofmt`-clean before the slice, and the implementation agent had to edit
+  it. The task told it to format the whole file; the alternative, exempting
+  it, would leave the check meaningless for that file.
+
+## What `slice run` does first
+
+1. Phase 1's manual steps 1 to 7 for one role: export, mounts, role files from
    templates, the run, the path check, and apply.
 2. `slice verify`: step 8, including the check of which tests fail against
    the stub, with declared exceptions.
