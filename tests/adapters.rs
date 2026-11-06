@@ -341,7 +341,7 @@ branch: \"feature/20261102-ENG-1-login\"
 base_commit: \"abc1234\"
 status: abandoned
 acceptance_criteria: [\"ENG-1-1\",\"ENG-1-2\"]
-invariants: [\"ENG-1-I1\"]
+invariants: [\"ENG-1-INV-1\"]
 spec_hash: \"s123\"
 test_hash: null
 budgets:
@@ -364,7 +364,7 @@ fn older_manifest_reads_back_without_a_reason() {
             id: SliceId("ENG-1-2".into()),
             status: ManifestStatus::Abandoned,
             acceptance_criteria: vec!["ENG-1-1".into(), "ENG-1-2".into()],
-            invariants: vec!["ENG-1-I1".into()],
+            invariants: vec!["ENG-1-INV-1".into()],
             spec_hash: Some("s123".into()),
             budgets: vec![("tokens".into(), "100k".into())],
             abandon_reason: None,

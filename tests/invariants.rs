@@ -1,7 +1,5 @@
 //! Property tests for the SLICE invariants over generated starting states,
-//! requests, injected write failures and unreachable sources. Marked
-//! `// invariant: <ID>` rather than with a Spool annotation until Spool has
-//! an ID format for invariants.
+//! requests, injected write failures and unreachable sources.
 
 mod common;
 
@@ -152,7 +150,7 @@ fn start() -> impl Strategy<Value = Start> {
 }
 
 proptest! {
-    // invariant: SLICE-1-I1
+    // SLICE-1-INV-1
     #[test]
     fn status_is_read_only(s in start()) {
         let fake = s.build();
@@ -164,7 +162,7 @@ proptest! {
         prop_assert_eq!(fake.snapshot(), before);
     }
 
-    // invariant: SLICE-2-I1
+    // SLICE-2-INV-1
     #[test]
     fn open_leaves_at_most_one_running_timer(s in start()) {
         let fake = s.build();
@@ -175,7 +173,7 @@ proptest! {
         prop_assert!(w.running().len() <= 1, "running: {:?}", w.running());
     }
 
-    // invariant: SLICE-2-I2
+    // SLICE-2-INV-2
     #[test]
     fn failed_open_leaves_no_trace(s in start()) {
         let fake = s.build();
@@ -191,7 +189,7 @@ proptest! {
         }
     }
 
-    // invariant: SLICE-3-I1
+    // SLICE-3-INV-1
     #[test]
     fn pause_never_starts_or_deletes(s in start()) {
         let fake = s.build();
@@ -209,7 +207,7 @@ proptest! {
         prop_assert_eq!(&after.manifests, &before.manifests);
     }
 
-    // invariant: SLICE-4-I1
+    // SLICE-4-INV-1
     #[test]
     fn resume_keeps_one_timer(s in start()) {
         let fake = s.build();
@@ -224,7 +222,7 @@ proptest! {
         }
     }
 
-    // invariant: SLICE-5-I1
+    // SLICE-5-INV-1
     #[test]
     fn failed_close_leaves_no_trace(s in start(), done in any::<bool>()) {
         let fake = s.build();
@@ -239,7 +237,7 @@ proptest! {
         }
     }
 
-    // invariant: SLICE-6-I1
+    // SLICE-6-INV-1
     #[test]
     fn abandon_never_touches_the_ticket(s in start()) {
         let fake = s.build();
@@ -257,7 +255,7 @@ proptest! {
         }
     }
 
-    // invariant: SLICE-7-I1
+    // SLICE-7-INV-1
     #[test]
     fn abandon_reason_stays_local(
         s in start(),
