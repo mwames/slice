@@ -59,7 +59,7 @@ requirements:
           and does not report that source's state as empty.
 
     invariants:
-      - id: SLICE-1-I1
+      - id: SLICE-1-INV-1
         title: Status Is Read-Only
         status: active
         description: >
@@ -233,14 +233,14 @@ requirements:
           restarted, and it exits zero.
 
     invariants:
-      - id: SLICE-2-I1
+      - id: SLICE-2-INV-1
         title: At Most One Running Timer
         status: active
         description: >
           For every starting state and every outcome of slice open,
           at most one Harvest timer is running afterward.
 
-      - id: SLICE-2-I2
+      - id: SLICE-2-INV-2
         title: Failed Open Leaves No Trace
         status: active
         description: >
@@ -312,7 +312,7 @@ requirements:
           and exits non-zero.
 
     invariants:
-      - id: SLICE-3-I1
+      - id: SLICE-3-INV-1
         title: Pause Never Starts Or Deletes
         status: active
         description: >
@@ -380,7 +380,7 @@ requirements:
           and exits non-zero.
 
     invariants:
-      - id: SLICE-4-I1
+      - id: SLICE-4-INV-1
         title: Resume Keeps One Timer
         status: active
         description: >
@@ -478,7 +478,7 @@ requirements:
           failed, and exits non-zero.
 
     invariants:
-      - id: SLICE-5-I1
+      - id: SLICE-5-INV-1
         title: Failed Close Leaves No Trace
         status: active
         description: >
@@ -574,7 +574,7 @@ requirements:
           with the next slice id.
 
     invariants:
-      - id: SLICE-6-I1
+      - id: SLICE-6-INV-1
         title: Abandon Never Touches The Ticket
         status: active
         description: >
@@ -666,7 +666,7 @@ requirements:
           then the reason is exactly what was written.
 
     invariants:
-      - id: SLICE-7-I1
+      - id: SLICE-7-INV-1
         title: Reason Stays Local
         status: active
         description: >

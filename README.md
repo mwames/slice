@@ -91,6 +91,5 @@ cargo test
 ~/bin/spool
 ```
 
-Every acceptance criterion in `.spool/` must have an annotated test. Spool exits
-non-zero if one doesn't. Property tests are marked `// invariant: <ID>` until
-Spool supports invariant IDs.
+Every acceptance criterion and invariant in `.spool/` must have an annotated
+test. Spool exits non-zero if one doesn't.
