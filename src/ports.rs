@@ -350,7 +350,7 @@ impl StatusReport {
 }
 
 /// Read the active slice, the running timer and the ticket's status, and
-/// compare them. Never writes to any port (SLICE-1-I1).
+/// compare them. Never writes to any port (SLICE-1-INV-1).
 pub fn status(deps: &Deps) -> PortResult<StatusReport> {
     let active = deps.state.active()?;
     let timer = deps.timer.running()?;
