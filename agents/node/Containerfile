@@ -1,0 +1,27 @@
+# The Node image an agent runs in. Built by agents/build-node-image.sh from a
+# repository's package.json and package-lock.json. The registry is public, so
+# npm ci runs here; a run itself never installs anything.
+FROM docker.io/library/node:24.7.0-bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git \
+ && rm -rf /var/lib/apt/lists/*
+
+# Dependencies live in /node_modules, above the workspace at /work, where
+# Node's and TypeScript's resolution find them by walking up. Install scripts
+# are skipped: agents compile and test, they never package.
+COPY package.json package-lock.json /opt/deps/
+RUN cd /opt/deps \
+ && npm ci --ignore-scripts --no-audit --no-fund \
+ && mv node_modules /node_modules \
+ && rm -rf /opt/deps
+ENV PATH="/node_modules/.bin:$PATH" npm_config_offline=true
+
+# Claude Code refuses to skip permission prompts as root. The base image's
+# node user (uid 1000) is the agent.
+USER node
+ARG CLAUDE_VERSION
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_VERSION"
+ENV PATH="/home/node/.local/bin:$PATH"
+
+WORKDIR /work
