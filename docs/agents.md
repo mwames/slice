@@ -266,7 +266,7 @@ What `slice run` and `slice verify` have to automate:
 6. Take the patch and check that it touches only the role's write paths.
 7. Apply it to the branch with `git apply --index`.
 8. On the host: `cargo fmt --check`, `cargo clippy --all-targets`,
-   `spool check`, and `cargo test --no-fail-fast`. For the test agent, also
+   `spool`, and `cargo test --no-fail-fast`. For the test agent, also
    check which new tests fail against the stub.
 9. Show the diff, and commit once it's approved.
 
@@ -310,10 +310,10 @@ What `slice run` and `slice verify` have to automate:
   reach Harvest or a ticket system. Its temporary directories aren't cleaned
   up yet.
 - **Spool doesn't track invariants.** The test agent used the repository's
-  `// invariant:` convention, which `spool check` ignores. Fixed since:
+  `// invariant:` convention, which `spool` ignores. Fixed since:
   Spool tracks invariants (INVARIANT-1, built in the Go runs below), and
   slice's invariants use `SLICE-<n>-INV-<n>` IDs, so a missing invariant
-  test fails `spool check`.
+  test fails `spool`.
 - **The token can leak through the editor.** Selecting the token file's line
   in the editor sent it into the conversation. The token now lives at
   `~/.config/slice/agent.env`, mode 600, outside every repository.
