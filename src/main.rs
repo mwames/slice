@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
-use slice::adapters::{git::Git, harvest::Harvest, state::FileState, tickets::Tickets};
+use slice::adapters::{git::Git, harvest::Harvest, podman::Podman, state::FileState, tickets::Tickets};
 use slice::config::Config;
 use slice::ports::*;
+use slice::run::{self, Role};
 
 const USAGE: &str = "usage:
   slice status [--json]
@@ -71,10 +72,10 @@ fn run(args: &[String]) -> Result<u8, String> {
         println!("{USAGE}");
         return Ok(0);
     }
-    let flags = parse(rest)?;
     if command == "run" {
         return run_agent(rest);
     }
+    let flags = parse(rest)?;
     // Refused before any config or state is loaded, so nothing can change.
     if flags.reason.is_some() && command != "abandon" {
         return Err(format!("--reason is only for abandon\n{USAGE}"));
@@ -348,5 +349,61 @@ fn print_outcome(result: Result<(String, Value), SliceError>, as_json: bool) -> 
 /// slice run: its own flags, then one agent run with Podman (SLICE-8,
 /// SLICE-9). Usage errors are returned as `Err`, which exits 2.
 fn run_agent(args: &[String]) -> Result<u8, String> {
-    todo!("SLICE-8-1")
+    let mut role = None;
+    let mut task = None;
+    let mut image = None;
+    let mut repo = None;
+    let mut json = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let mut value = |name: &str| {
+            it.next()
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value\n{USAGE}"))
+        };
+        match arg.as_str() {
+            "--json" => json = true,
+            "--task" => task = Some(value("--task")?),
+            "--image" => image = Some(value("--image")?),
+            "--repo" => repo = Some(PathBuf::from(value("--repo")?)),
+            a if a.starts_with('-') => return Err(format!("run does not take {a}\n{USAGE}")),
+            a if role.is_none() => {
+                role = Some(Role::parse(a).ok_or_else(|| format!("unknown role {a}: expected test or impl\n{USAGE}"))?)
+            }
+            a => return Err(format!("unexpected argument {a}\n{USAGE}")),
+        }
+    }
+    let role = role.ok_or_else(|| format!("run needs a role: test or impl\n{USAGE}"))?;
+    let task_path = task.ok_or_else(|| format!("run needs --task FILE\n{USAGE}"))?;
+    let image = image.ok_or_else(|| format!("run needs --image TAG\n{USAGE}"))?;
+    let task = std::fs::read_to_string(&task_path).map_err(|e| format!("cannot read task file {task_path}: {e}"))?;
+    let repo = match repo {
+        Some(repo) => repo,
+        None => std::env::current_dir().map_err(|e| e.to_string())?,
+    };
+
+    let settings = Config::load().and_then(|c| c.agent_settings());
+    let request = run::RunRequest {
+        role,
+        repo,
+        task,
+        image,
+        runs_dir: FileState::default_dir().join("runs"),
+    };
+    match run::run(&Podman, settings, &request) {
+        Ok(result) => {
+            if json {
+                println!("{}", result.to_json());
+            } else if result.exit_code() == 0 {
+                println!("{}", result.message());
+            } else {
+                eprintln!("{}", result.message());
+            }
+            Ok(result.exit_code() as u8)
+        }
+        Err(e) => {
+            eprintln!("slice: {}", e.message());
+            Ok(1)
+        }
+    }
 }

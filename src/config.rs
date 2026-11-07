@@ -126,6 +126,20 @@ impl Config {
     /// The agent settings for slice run, or an error naming what's missing:
     /// no Spool path, or one that doesn't exist (SLICE-8-3, SLICE-8-4).
     pub fn agent_settings(&self) -> Result<AgentSettings, String> {
-        todo!("SLICE-8-4")
+        let spool = match self.agents.spool.as_deref() {
+            Some(s) if !s.trim().is_empty() => expand_home(s),
+            _ => return Err("no Spool binary: set [agents] spool in the slice config".to_string()),
+        };
+        if !spool.exists() {
+            return Err(format!(
+                "the Spool binary {} does not exist: check [agents] spool in the slice config",
+                spool.display()
+            ));
+        }
+        let env_file = match self.agents.env_file.as_deref() {
+            Some(f) => expand_home(f),
+            None => home().join(".config/slice/agent.env"),
+        };
+        Ok(AgentSettings { spool, env_file })
     }
 }
