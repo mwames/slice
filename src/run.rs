@@ -269,6 +269,11 @@ pub struct RunResult {
     pub turns: Option<u64>,
     /// Why the run failed or the patch didn't apply.
     pub reason: Option<String>,
+    /// HEAD's full hash when the run started (SLICE-9-1, SLICE-9-5).
+    pub head: String,
+    /// The paths staged when the run started, sorted (SLICE-9-1,
+    /// SLICE-9-5).
+    pub staged: Vec<String>,
 }
 
 impl RunResult {
@@ -356,13 +361,22 @@ impl RunResult {
     }
 }
 
+/// A repository with unstaged changes to tracked files (SLICE-8-2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unstaged {
+    pub repo: PathBuf,
+    /// The tracked paths whose working-tree contents differ from the
+    /// index, sorted.
+    pub paths: Vec<String>,
+}
+
 /// Why `slice run` stopped before starting a container. Each exits 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunError {
     /// SLICE-8-2.
     NotARepository(PathBuf),
-    /// SLICE-8-2.
-    Dirty(PathBuf),
+    /// SLICE-8-2: the working tree differs from the index.
+    Dirty(Unstaged),
     /// SLICE-8-3 and SLICE-8-4: what's missing or wrong.
     Setup(String),
 }
@@ -371,9 +385,9 @@ impl RunError {
     pub fn message(&self) -> String {
         match self {
             RunError::NotARepository(p) => format!("{} is not a git repository", p.display()),
-            RunError::Dirty(p) => format!(
+            RunError::Dirty(u) => format!(
                 "{} has changes to tracked files; commit or stash them before slice run",
-                p.display()
+                u.repo.display()
             ),
             RunError::Setup(what) => what.clone(),
         }
@@ -547,7 +561,10 @@ pub fn run(
     let changes = git_text(&repo, &["status", "--porcelain", "--untracked-files=no"])
         .map_err(|e| RunError::Setup(format!("git status: {e}")))?;
     if !changes.is_empty() {
-        return Err(RunError::Dirty(repo));
+        return Err(RunError::Dirty(Unstaged {
+            repo,
+            paths: Vec::new(),
+        }));
     }
 
     let settings = settings.map_err(RunError::Setup)?;
@@ -637,6 +654,8 @@ pub fn run(
         duration_ms: None,
         turns: None,
         reason: None,
+        head: String::new(),
+        staged: Vec::new(),
     };
     let parsed = match &output.exit {
         ContainerExit::FailedToStart(why) => Err(format!("the container could not be started: {why}")),
