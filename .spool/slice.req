@@ -673,3 +673,267 @@ requirements:
           For every run of slice abandon with a reason, successful or not,
           the reason is written only to the slice's manifest: never to the
           ticket, and never to a Harvest entry's notes.
+
+  - id: SLICE-8
+    title: Agent Run
+    description: >
+      slice run test|impl --task <file> --image <tag> runs one agent on the
+      repository at HEAD in a Podman container that holds an export of
+      HEAD, not the repository, in which only the role's own paths can be
+      written. It writes the run's files to a new run directory and reads
+      back the agent's report and patch. The repository is the current
+      directory, or --repo. The role prompts and path globs come from the
+      repository's .slice.toml; the Linux Spool binary and the token's env
+      file come from slice's config.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-06
+    rationale: >
+      Phase 1 and four slices since (INVARIANT-1, INVARIANT-2, TREE-1 and
+      COVERAGE) ran the same manual steps every time: export, baseline,
+      role files, a generated list of read-only mounts, the podman command,
+      and reading the result. Doing them by hand is slow and easy to get
+      subtly wrong, and the mounts are what keep each role to its own
+      files. The repository at HEAD, rather than the active slice, is what
+      a run needs, because most of that work had no ticket. The image is
+      passed in, because each stack has its own build script, and building
+      images is a separate concern. The prompts live in each repository,
+      because what "done" means (the test, lint and format commands)
+      differs per stack.
+    superseded_by:
+    out_of_scope:
+      - Building images or the Linux Spool binary
+      - The network allow-list proxy
+      - The churn guard and stream-json monitoring
+      - slice verify, the test-hash lock, and recording the run in a
+        slice manifest
+      - Removing old run directories
+      - Committing the patch (SLICE-9 stages it; a person commits)
+      - Retrying a failed or blocked run
+    acceptance_criteria:
+      - id: SLICE-8-1
+        title: Run Usage Errors
+        status: active
+        description: >
+          Given slice run with no role, a role other than test or impl, no
+          --task, no --image, a --task file that can't be read, or a flag
+          run doesn't take,
+          when it is run,
+          then it prints a usage error naming the problem, starts no
+          container, creates no run directory, and exits 2.
+
+      - id: SLICE-8-2
+        title: Repository Must Be Clean
+        status: active
+        description: >
+          Given a repository with staged or unstaged changes to tracked
+          files, or a path that isn't a git repository,
+          when slice run is run on it,
+          then it says so, starts no container, creates no run directory,
+          and exits 1. Untracked files don't count as changes.
+
+      - id: SLICE-8-3
+        title: Setup Must Be Complete
+        status: active
+        description: >
+          Given a repository with no .slice.toml, a .slice.toml with no
+          path globs for the role (test for test, source for impl), a role
+          prompt file that doesn't exist at HEAD, or a slice config with
+          no Spool binary path or a path that doesn't exist,
+          when slice run is run on it,
+          then it names what's missing, starts no container, creates no run
+          directory, and exits 1.
+
+      - id: SLICE-8-4
+        title: Configuration
+        status: active
+        description: >
+          Given a .slice.toml with
+          [paths] test = [globs] and source = [globs], and optionally
+          [agent] test_prompt, impl_prompt, test_model, impl_model and
+          timeout_secs; and a slice config with [agents] spool = <path>
+          and optionally env_file = <path>,
+          when slice run is run,
+          then the prompt paths default to .slice/test-agent.md and
+          .slice/impl-agent.md, the models to opus and sonnet, the timeout
+          to 2700 seconds, and the env file to ~/.config/slice/agent.env.
+          An unknown key in either file is an error naming it, and exits 1.
+
+      - id: SLICE-8-5
+        title: Write Sets
+        status: active
+        description: >
+          Given the globs in .slice.toml, where ** matches any number of
+          whole path segments, * matches any run of characters within one
+          segment, and everything else matches itself,
+          when a role's write set is decided,
+          then the test role may write paths matching a test glob, and the
+          impl role may write paths matching a source glob and no test
+          glob. For example, with test = ["**/*_test.go"] and
+          source = ["**/*.go"], a.go and pkg/b.go are impl paths and
+          pkg/b_test.go is a test path, and with test = ["tests/**"],
+          tests/x.rs and tests/common/mod.rs are test paths and src/x.rs is
+          not.
+
+      - id: SLICE-8-6
+        title: Workspace
+        status: active
+        description: >
+          Given a clean repository,
+          when slice run is run,
+          then it creates a new run directory under
+          $XDG_STATE_HOME/slice/runs (default ~/.local/state/slice/runs)
+          whose name includes the role, holding a workspace with exactly
+          the files tracked at HEAD and their contents, a baseline of that
+          workspace in a git directory kept outside it, and a role
+          directory holding prompt.md (the role's prompt file as at HEAD),
+          task.md (the --task file) and report.schema.json (the report
+          schema built into slice).
+
+      - id: SLICE-8-7
+        title: Container
+        status: active
+        description: >
+          Given a run directory as in SLICE-8-6,
+          when the container is started,
+          then it uses the given image, the role's model and the timeout,
+          passes the env file by path, mounts the workspace writable at
+          /work, mounts read-only on top every file tracked at HEAD that
+          isn't in the role's write set at /work/<path>, the role
+          directory at /role, and the Spool binary at
+          /usr/local/bin/spool, and runs claude with the task as the
+          prompt, the role prompt appended to the system prompt, the
+          report schema, bypassed permissions, no setting sources, a
+          strict MCP config and no session persistence.
+
+      - id: SLICE-8-8
+        title: Report Read
+        status: active
+        description: >
+          Given the container exits with JSON output whose
+          structured_output is a report (status green or blocked,
+          files_touched, assumptions, questions, summary),
+          when the run finishes,
+          then the report, the cost, the duration and the turn count are
+          read from it, the output is kept as result.json and the
+          container's stderr as agent.log in the run directory, and the
+          patch is the workspace's diff against its baseline, new files
+          included, kept as changes.patch in the run directory.
+
+      - id: SLICE-8-9
+        title: Run Failed
+        status: active
+        description: >
+          Given the container can't start, exits non-zero, times out, or
+          exits without output holding a valid report,
+          when the run finishes,
+          then slice run says the run failed and why, names the run
+          directory and its agent.log, stages nothing, and exits 1.
+
+    invariants:
+      - id: SLICE-8-INV-1
+        title: The Container Never Sees The Repository
+        status: active
+        description: >
+          For every run, every path mounted into the container is inside
+          the run directory, except the Spool binary, mounted read-only,
+          and the env file, which is passed by path and never read, copied
+          or printed by slice.
+
+  - id: SLICE-9
+    title: Patch Staging
+    description: >
+      After an agent run, slice run checks every path the patch touches
+      against the role's write set. A green report with a patch that
+      passes is staged in the repository with git apply --index and never
+      committed. Anything else stages nothing.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-06
+    rationale: >
+      The read-only mounts stop an agent changing a tracked file it
+      mustn't, but not creating a new one, for example a source file from
+      the test role, so the path check is what keeps the source/test split
+      complete. Staging rather than committing keeps a person between
+      every agent and the history: the staged diff is what gets reviewed,
+      and the commit follows approval, as in every slice so far. A blocked
+      report means the spec needs work, so its patch is kept for reading
+      but not staged.
+    superseded_by:
+    out_of_scope:
+      - Committing, amending or pushing
+      - Applying a patch from an earlier run
+      - Checks beyond the path check (tests, lint, coverage; that's
+        slice verify)
+    acceptance_criteria:
+      - id: SLICE-9-1
+        title: Green Patch Staged
+        status: active
+        description: >
+          Given a run whose report is green and whose patch touches only
+          paths in the role's write set,
+          when the run finishes,
+          then the patch is applied to the repository's working tree and
+          index, new files included, nothing is committed, and slice run
+          prints the report's status, summary, assumptions and files, the
+          cost, the duration and the run directory, and exits 0.
+
+      - id: SLICE-9-2
+        title: Path Outside The Write Set
+        status: active
+        description: >
+          Given a run whose patch adds, changes, deletes or renames any
+          path outside the role's write set,
+          when the run finishes,
+          then nothing is staged, slice run lists every such path, keeps
+          the patch in the run directory, and exits 1, whatever the
+          report's status.
+
+      - id: SLICE-9-3
+        title: Blocked
+        status: active
+        description: >
+          Given a run whose report is blocked,
+          when the run finishes,
+          then nothing is staged, slice run prints the report's questions,
+          assumptions and summary, keeps the patch in the run directory,
+          and exits 1.
+
+      - id: SLICE-9-4
+        title: Repository Moved
+        status: active
+        description: >
+          Given HEAD changed, or tracked files were changed, while the
+          agent ran, or the patch otherwise doesn't apply,
+          when the run finishes,
+          then nothing is staged, slice run says why, keeps the patch in
+          the run directory, and exits 1.
+
+      - id: SLICE-9-5
+        title: JSON Output
+        status: active
+        description: >
+          Given --json,
+          when slice run finishes after a container ran,
+          then it prints one JSON object with "outcome" ("staged",
+          "rejected", "blocked", "moved" or "failed"), "run_dir",
+          "report" (the agent's report, or null when the run failed),
+          "rejected_paths" ([] unless rejected), "cost_usd",
+          "duration_ms" and "turns" (null when unknown), and exits as
+          without --json.
+
+    invariants:
+      - id: SLICE-9-INV-1
+        title: Only The Write Set Is Staged
+        status: active
+        description: >
+          For every run, successful or not, slice run never commits,
+          never moves HEAD or a branch, and never stages a path outside
+          the role's write set; when it exits non-zero, the repository's
+          index and working tree are as they were before the run.
