@@ -129,8 +129,15 @@ needs no package registry:
   the image's toolchain, and the standard library is pre-built. The tag
   hashes `go.mod`, `go.sum`, the Containerfile and the Claude Code version.
   `agents/build-go-image.sh` builds it.
-- **Node** (provision-web and similar), later: `node:<.nvmrc>-slim`, `npm ci`
-  at build time.
+- **Node:** `node:<pinned>-bookworm-slim`, plus `git` and the Claude Code CLI
+  at a pinned version, running as the base image's `node` user. The npm
+  registry is public, so `npm ci --ignore-scripts` runs in the image build,
+  and the result moves to `/node_modules`, above the workspace at `/work`.
+  Node and TypeScript find it by walking up from the workspace, so the
+  workspace holds only the repository. `npm_config_offline=true` keeps a run
+  from installing anything. The tag hashes `package.json`,
+  `package-lock.json`, the Containerfile and the Claude Code version.
+  `agents/build-node-image.sh` builds it.
 
 The image is rebuilt when the lockfile changes. Its tag carries a hash of the
 lockfile, so a stale image is never used by mistake.
@@ -355,10 +362,50 @@ What was new:
   it. The task told it to format the whole file; the alternative, exempting
   it, would leave the check meaningless for that file.
 
+## Node run
+
+Run on 2026-11-06 against spool-vscode, in the Node image: TREE-1
+(invariants in the editor's Requirements tree). Both runs finished `green`,
+with no questions, and every check passed again on the host.
+
+| | TREE-1 tests | TREE-1 code |
+| --- | --- | --- |
+| Model | `opus` | `sonnet` |
+| Time | 56 s | 17 s |
+| Turns | 8 | 11 |
+| Reported cost | $0.41 | $0.13 |
+| Patch | 218 lines, 1 test file | 48 lines, 1 file |
+| Outcome | 9 tests failing against the stub, 4 passing as declared | All tests passing |
+
+The cheapest slice so far, because the stub had already narrowed it to one
+module of pure functions.
+
+What was new:
+
+- **Code that imports `vscode` can't be tested in a container.** The module
+  exists only inside the editor. The stub moved the tree's logic into
+  `treeModel.ts`, which imports nothing from `vscode`, and left
+  `treeView.ts` a thin wrapper. The test agent tested the model and said
+  so. For any editor or UI code, the stub step is where that split has to
+  happen; the test agent can't make it.
+- **Node keeps tests beside the code too.** `src/*.test.ts` sits next to
+  `src/*.ts`, so the workspace is mounted the Go way, with a read-only
+  mount per file (16 for the test agent, 13 for the implementation agent).
+- **Spool has to be in the container.** The agents run Spool to check their
+  annotations, and the Node image has no Go toolchain to build it. A Linux
+  build of Spool was mounted read-only at `/usr/local/bin/spool`. `slice
+  run` should do the same for every image, from one pinned Spool build.
+- **Compatibility tests pass against the stub.** TREE-1-6 says an older
+  server changes nothing, so its tests describe today's behavior and pass
+  before any code is written. The test agent declared all four such tests,
+  as the role prompt asks, which is what `slice verify` will check.
+
 ## What `slice run` does first
 
 1. Phase 1's manual steps 1 to 7 for one role: export, mounts, role files from
-   templates, the run, the path check, and apply.
+   templates, the run, the path check, and apply. The image is chosen from
+   the repository's lockfile, and a pinned Linux build of Spool is mounted
+   into every run.
 2. `slice verify`: step 8, including the check of which tests fail against
    the stub, with declared exceptions.
 3. The churn guard, which watches the run through `--output-format
