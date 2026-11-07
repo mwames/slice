@@ -12,7 +12,8 @@ const USAGE: &str = "usage:
   slice pause [--json]
   slice resume [--json]
   slice close [--done] [--json]
-  slice abandon [--reason TEXT] [--json]";
+  slice abandon [--reason TEXT] [--json]
+  slice run test|impl --task FILE --image TAG [--repo PATH] [--json]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,6 +72,9 @@ fn run(args: &[String]) -> Result<u8, String> {
         return Ok(0);
     }
     let flags = parse(rest)?;
+    if command == "run" {
+        return run_agent(rest);
+    }
     // Refused before any config or state is loaded, so nothing can change.
     if flags.reason.is_some() && command != "abandon" {
         return Err(format!("--reason is only for abandon\n{USAGE}"));
@@ -339,4 +343,10 @@ fn print_outcome(result: Result<(String, Value), SliceError>, as_json: bool) -> 
         eprintln!("slice: {message}");
     }
     code
+}
+
+/// slice run: its own flags, then one agent run with Podman (SLICE-8,
+/// SLICE-9). Usage errors are returned as `Err`, which exits 2.
+fn run_agent(args: &[String]) -> Result<u8, String> {
+    todo!("SLICE-8-1")
 }

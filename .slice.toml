@@ -1,0 +1,5 @@
+# What slice run lets each agent role write. Everything else tracked is
+# read-only in the container.
+[paths]
+test = ["tests/**"]
+source = ["src/**"]

@@ -686,7 +686,7 @@ requirements:
       repository's .slice.toml; the Linux Spool binary and the token's env
       file come from slice's config.
     status: active
-    interface: src/ports.rs
+    interface: src/run.rs
     deciders:
       - Matt Ames
     consulted: []
@@ -851,7 +851,7 @@ requirements:
       passes is staged in the repository with git apply --index and never
       committed. Anything else stages nothing.
     status: active
-    interface: src/ports.rs
+    interface: src/run.rs
     deciders:
       - Matt Ames
     consulted: []
