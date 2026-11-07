@@ -718,8 +718,8 @@ requirements:
         title: Run Usage Errors
         status: active
         description: >
-          Given slice run with no role, a role other than test or impl, no
-          --task, no --image, a --task file that can't be read, or a flag
+          Given slice run with no role, a role other than test or impl
+          (exactly, in lower case), no --task, no --image, a --task file that can't be read, or a flag
           run doesn't take,
           when it is run,
           then it prints a usage error naming the problem, starts no
@@ -799,7 +799,8 @@ requirements:
         description: >
           Given a run directory as in SLICE-8-6,
           when the container is started,
-          then it uses the given image, the role's model and the timeout,
+          then it runs the podman found on PATH with the given image, the
+          role's model and the timeout,
           passes the env file by path, mounts the workspace writable at
           /work, mounts read-only on top every file tracked at HEAD that
           isn't in the role's write set at /work/<path>, the role
@@ -827,8 +828,9 @@ requirements:
         title: Run Failed
         status: active
         description: >
-          Given the container can't start, exits non-zero, times out, or
-          exits without output holding a valid report,
+          Given the container can't start, exits non-zero (even with a
+          valid report in its output, which is then not used), times out,
+          or exits without output holding a valid report,
           when the run finishes,
           then slice run says the run failed and why, names the run
           directory and its agent.log, stages nothing, and exits 1.
@@ -882,7 +884,8 @@ requirements:
           then the patch is applied to the repository's working tree and
           index, new files included, nothing is committed, and slice run
           prints the report's status, summary, assumptions and files, the
-          cost, the duration and the run directory, and exits 0.
+          cost, the duration in seconds to one decimal place (16.8 s for
+          16791 ms) and the run directory, and exits 0.
 
       - id: SLICE-9-2
         title: Path Outside The Write Set
@@ -893,7 +896,8 @@ requirements:
           when the run finishes,
           then nothing is staged, slice run lists every such path, keeps
           the patch in the run directory, and exits 1, whatever the
-          report's status.
+          report's status: the outcome is rejected even when the report is
+          blocked.
 
       - id: SLICE-9-3
         title: Blocked
@@ -910,7 +914,8 @@ requirements:
         status: active
         description: >
           Given HEAD changed, or tracked files were changed, while the
-          agent ran, or the patch otherwise doesn't apply,
+          agent ran, or the patch otherwise doesn't apply (for example, it
+          adds a file where an untracked file now sits),
           when the run finishes,
           then nothing is staged, slice run says why, keeps the patch in
           the run directory, and exits 1.
