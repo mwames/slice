@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use slice::ports::*;
 
+pub mod agent;
+
 pub const T: &str = "ENG-1";
 pub const U: &str = "ENG-2";
 pub const MONDAY: &str = "TBOARD-3";

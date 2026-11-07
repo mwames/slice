@@ -18,6 +18,10 @@
 //! [harvest]                           # default: HARVEST_DEFAULT_PROJECT
 //! project = "Acme Product"             # and HARVEST_DEFAULT_TASK
 //! task = "New Development"
+//!
+//! [agents]                            # for slice run
+//! spool = "~/bin/spool-linux-arm64"    # required by slice run
+//! env_file = "~/.config/slice/agent.env"   # the default
 //! ```
 
 use std::path::PathBuf;
@@ -25,6 +29,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::ports::{Settings, Statuses};
+use crate::run::AgentSettings;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -32,6 +37,7 @@ pub struct Config {
     pub worktree_root: Option<String>,
     pub status: StatusConfig,
     pub harvest: HarvestConfig,
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -65,6 +71,14 @@ impl StatusNames {
 pub struct HarvestConfig {
     pub project: String,
     pub task: String,
+}
+
+/// What slice run mounts and passes into an agent's container.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentsConfig {
+    pub spool: Option<String>,
+    pub env_file: Option<String>,
 }
 
 pub fn home() -> PathBuf {
@@ -107,5 +121,25 @@ impl Config {
             done: self.status.done.or("complete", "Done"),
             worktree_root: self.worktree_root.as_deref().map(expand_home),
         }
+    }
+
+    /// The agent settings for slice run, or an error naming what's missing:
+    /// no Spool path, or one that doesn't exist (SLICE-8-3, SLICE-8-4).
+    pub fn agent_settings(&self) -> Result<AgentSettings, String> {
+        let spool = match self.agents.spool.as_deref() {
+            Some(s) if !s.trim().is_empty() => expand_home(s),
+            _ => return Err("no Spool binary: set [agents] spool in the slice config".to_string()),
+        };
+        if !spool.exists() {
+            return Err(format!(
+                "the Spool binary {} does not exist: check [agents] spool in the slice config",
+                spool.display()
+            ));
+        }
+        let env_file = match self.agents.env_file.as_deref() {
+            Some(f) => expand_home(f),
+            None => home().join(".config/slice/agent.env"),
+        };
+        Ok(AgentSettings { spool, env_file })
     }
 }
