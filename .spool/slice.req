@@ -748,7 +748,8 @@ requirements:
         title: Setup Must Be Complete
         status: active
         description: >
-          Given a repository with no .slice.toml, a .slice.toml with no
+          Given a repository with no .slice.toml in the index (it is read
+          as staged, like the role prompt), a .slice.toml with no
           path globs for the role (test for test, source for impl), a role
           prompt file that isn't in the index, or a slice config with
           no Spool binary path or a path that doesn't exist,
@@ -897,8 +898,9 @@ requirements:
           nothing is committed, and slice run prints the report's status,
           summary, assumptions and files, the cost, the duration in seconds
           to one decimal place (16.8 s for 16791 ms), the run directory,
-          and what the run started from: HEAD's short hash and the paths
-          that were staged when it started, if any. It exits 0.
+          and what the run started from: HEAD's short hash, as git
+          rev-parse --short prints it, and the paths that were staged when
+          it started, if any. It exits 0.
 
       - id: SLICE-9-2
         title: Path Outside The Write Set
@@ -946,7 +948,10 @@ requirements:
           "rejected_paths" ([] unless rejected), "cost_usd",
           "duration_ms" and "turns" (null when unknown), "head" (HEAD's
           full hash when the run started) and "staged" (the paths staged
-          when it started, sorted, [] when none), and exits as without
+          when it started, sorted, [] when none: every path whose index
+          entry differs from HEAD, staged deletions included, with a
+          rename listed as its two paths), both present for every
+          run that started a container, failed ones included, and exits as without
           --json.
 
       - id: SLICE-9-6
