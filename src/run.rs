@@ -1,6 +1,6 @@
 //! `slice run test|impl`: one agent run in a container on an export of the
-//! repository at HEAD, then the path check and staging of its patch
-//! (SLICE-8, SLICE-9).
+//! repository's staged state (HEAD plus whatever is staged), then the path
+//! check and staging of its patch (SLICE-8, SLICE-9).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -274,6 +274,9 @@ pub struct RunResult {
     /// The paths staged when the run started, sorted (SLICE-9-1,
     /// SLICE-9-5).
     pub staged: Vec<String>,
+    /// HEAD's short hash as `git rev-parse --short` prints it, for the
+    /// message (SLICE-9-1).
+    pub head_short: String,
 }
 
 impl RunResult {
@@ -322,6 +325,8 @@ impl RunResult {
             out.push_str(&format!("duration: {:.1} s\n", ms as f64 / 1000.0));
         }
         out.push_str(&format!("run directory: {dir}\n"));
+        out.push_str(&format!("started from HEAD {}\n", self.head_short));
+        push_list(&mut out, "staged when it started", &self.staged);
         if self.outcome != Outcome::Staged {
             out.push_str(&format!("patch kept at {}\n", patch.display()));
         }
@@ -357,6 +362,8 @@ impl RunResult {
             "cost_usd": self.cost_usd,
             "duration_ms": self.duration_ms,
             "turns": self.turns,
+            "head": self.head,
+            "staged": self.staged,
         })
     }
 }
@@ -386,8 +393,9 @@ impl RunError {
         match self {
             RunError::NotARepository(p) => format!("{} is not a git repository", p.display()),
             RunError::Dirty(u) => format!(
-                "{} has changes to tracked files; commit or stash them before slice run",
-                u.repo.display()
+                "{} has unstaged changes to tracked files; stage them before slice run:\n  {}",
+                u.repo.display(),
+                u.paths.join("\n  ")
             ),
             RunError::Setup(what) => what.clone(),
         }
@@ -481,27 +489,47 @@ fn create_run_dir(runs_dir: &Path, role: Role) -> Result<PathBuf, String> {
     unreachable!()
 }
 
-/// The regular files tracked at HEAD.
-fn tracked_files(repo: &Path) -> Result<Vec<String>, String> {
-    let out = git(["-C", &repo.to_string_lossy(), "ls-tree", "-r", "-z", "HEAD"], &[])?;
-    let mut paths = Vec::new();
-    for entry in String::from_utf8_lossy(&out).split('\0').filter(|e| !e.is_empty()) {
-        let (meta, path) = entry.split_once('\t').ok_or("unexpected ls-tree output")?;
+/// The index's entries, as `git ls-files -s -z` prints them.
+fn index_entries(repo: &Path) -> Result<Vec<u8>, String> {
+    git(["-C", &repo.to_string_lossy(), "ls-files", "-s", "-z"], &[])
+}
+
+/// The regular files in the index.
+fn index_files(entries: &[u8]) -> Result<Vec<String>, String> {
+    let mut paths: Vec<String> = Vec::new();
+    for entry in String::from_utf8_lossy(entries).split('\0').filter(|e| !e.is_empty()) {
+        let (meta, path) = entry.split_once('\t').ok_or("unexpected ls-files output")?;
         // A symlink or submodule can't be mounted read-only safely: its host
         // path may lead out of the run directory.
-        if !meta.starts_with("120000") && !meta.starts_with("160000") {
+        if !meta.starts_with("120000") && !meta.starts_with("160000") && !paths.iter().any(|p| p == path) {
             paths.push(path.to_string());
         }
     }
     Ok(paths)
 }
 
-/// Export HEAD into `workspace`, and commit it as a baseline in `baseline`.
-fn make_workspace(repo: &Path, head: &str, run_dir: &Path, workspace: &Path, baseline: &Path) -> Result<(), String> {
+/// The sorted paths of `git diff --name-only <args>`, renames as two paths.
+fn diff_paths(repo: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let repo_arg = repo.to_string_lossy().to_string();
+    let mut full = vec!["-C", repo_arg.as_str(), "diff", "--name-only", "-z", "--no-renames"];
+    full.extend(args);
+    let out = git(full, &[])?;
+    let mut paths: Vec<String> = String::from_utf8_lossy(&out)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    Ok(paths)
+}
+
+/// Export the index into `workspace`, and commit it as a baseline in `baseline`.
+fn make_workspace(repo: &Path, run_dir: &Path, workspace: &Path, baseline: &Path) -> Result<(), String> {
     let index = run_dir.join("export.index");
     let envs = [("GIT_INDEX_FILE", index.as_path())];
     let repo_arg = repo.to_string_lossy().to_string();
-    git(["-C", &repo_arg, "read-tree", head], &envs)?;
+    let real_index = git_text(repo, &["rev-parse", "--path-format=absolute", "--git-path", "index"])?;
+    std::fs::copy(&real_index, &index).map_err(|e| format!("copy the index: {e}"))?;
     let prefix = format!("{}/", workspace.display());
     git(["-C", &repo_arg, "checkout-index", "-a", "--prefix", &prefix], &envs)?;
     std::fs::remove_file(&index).map_err(|e| e.to_string())?;
@@ -558,20 +586,19 @@ pub fn run(
     let repo = git_text(&request.repo, &["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
         .map_err(|_| RunError::NotARepository(request.repo.clone()))?;
-    let changes = git_text(&repo, &["status", "--porcelain", "--untracked-files=no"])
-        .map_err(|e| RunError::Setup(format!("git status: {e}")))?;
-    if !changes.is_empty() {
-        return Err(RunError::Dirty(Unstaged {
-            repo,
-            paths: Vec::new(),
-        }));
+    let unstaged = diff_paths(&repo, &[]).map_err(|e| RunError::Setup(format!("git diff: {e}")))?;
+    if !unstaged.is_empty() {
+        return Err(RunError::Dirty(Unstaged { repo, paths: unstaged }));
     }
 
     let settings = settings.map_err(RunError::Setup)?;
     let head = git_text(&repo, &["rev-parse", "--verify", "HEAD"])
         .map_err(|e| RunError::Setup(format!("{} has no commit at HEAD: {e}", repo.display())))?;
-    let toml = git_text(&repo, &["show", "HEAD:.slice.toml"])
-        .map_err(|_| RunError::Setup(format!(".slice.toml is missing at HEAD in {}", repo.display())))?;
+    let head_short = git_text(&repo, &["rev-parse", "--short", "HEAD"]).map_err(RunError::Setup)?;
+    let staged = diff_paths(&repo, &["--cached", "HEAD"]).map_err(RunError::Setup)?;
+    let entries = index_entries(&repo).map_err(RunError::Setup)?;
+    let toml = git_text(&repo, &["show", ":.slice.toml"])
+        .map_err(|_| RunError::Setup(format!(".slice.toml is missing from the index in {}", repo.display())))?;
     let config = RepoConfig::parse(&toml).map_err(|e| RunError::Setup(format!(".slice.toml: {e}")))?;
     if config.globs(role).is_empty() {
         let (key, name) = match role {
@@ -589,12 +616,12 @@ pub fn run(
             repo.to_string_lossy().to_string(),
             "cat-file".to_string(),
             "blob".to_string(),
-            format!("HEAD:{prompt_path}"),
+            format!(":{prompt_path}"),
         ],
         &[],
     )
-    .map_err(|_| RunError::Setup(format!("the role prompt {prompt_path} is missing at HEAD")))?;
-    let tracked = tracked_files(&repo).map_err(RunError::Setup)?;
+    .map_err(|_| RunError::Setup(format!("the role prompt {prompt_path} is missing from the index")))?;
+    let tracked = index_files(&entries).map_err(RunError::Setup)?;
 
     let setup = |what: &str, e: String| RunError::Setup(format!("{what}: {e}"));
     let runs_dir = std::path::absolute(&request.runs_dir).map_err(|e| setup("runs directory", e.to_string()))?;
@@ -602,7 +629,7 @@ pub fn run(
     let workspace = run_dir.join("workspace");
     let role_dir = run_dir.join("role");
     let baseline = run_dir.join("baseline.git");
-    make_workspace(&repo, &head, &run_dir, &workspace, &baseline).map_err(|e| setup("export HEAD", e))?;
+    make_workspace(&repo, &run_dir, &workspace, &baseline).map_err(|e| setup("export the index", e))?;
     std::fs::create_dir(&role_dir).map_err(|e| setup("role directory", e.to_string()))?;
     for (name, content) in [
         ("prompt.md", prompt.as_slice()),
@@ -654,8 +681,9 @@ pub fn run(
         duration_ms: None,
         turns: None,
         reason: None,
-        head: String::new(),
-        staged: Vec::new(),
+        head: head.clone(),
+        staged,
+        head_short,
     };
     let parsed = match &output.exit {
         ContainerExit::FailedToStart(why) => Err(format!("the container could not be started: {why}")),
@@ -698,7 +726,7 @@ pub fn run(
     } else if !green {
         result.outcome = Outcome::Blocked;
     } else {
-        match stage(&repo, &head, &patch_file, patch.is_empty()) {
+        match stage(&repo, &head, &entries, &patch_file, patch.is_empty()) {
             Ok(()) => result.outcome = Outcome::Staged,
             Err(why) => {
                 result.outcome = Outcome::Moved;
@@ -711,13 +739,15 @@ pub fn run(
 
 /// Apply the patch to the repository's index and working tree, if the
 /// repository is as the run found it.
-fn stage(repo: &Path, head: &str, patch_file: &Path, empty: bool) -> Result<(), String> {
+fn stage(repo: &Path, head: &str, entries: &[u8], patch_file: &Path, empty: bool) -> Result<(), String> {
     let now = git_text(repo, &["rev-parse", "--verify", "HEAD"])?;
     if now != head {
         return Err(format!("HEAD moved from {head} to {now} while the agent ran"));
     }
-    let changes = git_text(repo, &["status", "--porcelain", "--untracked-files=no"])?;
-    if !changes.is_empty() {
+    if index_entries(repo)? != entries {
+        return Err("the index changed while the agent ran".to_string());
+    }
+    if !diff_paths(repo, &[])?.is_empty() {
         return Err("tracked files changed while the agent ran".to_string());
     }
     if empty {
