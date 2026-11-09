@@ -1,7 +1,8 @@
 //! `slice run` from the command line: usage errors and the checks made before
-//! a container starts (SLICE-8-1 to SLICE-8-4), and that the podman on PATH
-//! is what starts it (SLICE-8-7). The binary runs with HOME,
-//! XDG_CONFIG_HOME and XDG_STATE_HOME in a fresh temporary directory, and a
+//! a container starts (SLICE-8-1 to SLICE-8-4), that the podman on PATH is
+//! what starts it (SLICE-8-7), and the --json fields naming what a run started
+//! from (SLICE-9-5). The binary runs with HOME, XDG_CONFIG_HOME and
+//! XDG_STATE_HOME in a fresh temporary directory, and a
 //! `podman` on PATH that only records that it was called, so nothing can
 //! reach real configuration, state or Podman.
 
@@ -261,8 +262,54 @@ fn assert_stops(home: &Home, cwd: &Path, repo: Option<&Path>, names: &[&str]) {
 fn dirty_repository_exits_1() {
     let home = Home::new("cli-dirty");
     write(&home.repo, "src/lib.rs", "// changed\n");
-    assert_stops(&home, &home.repo, None, &[]);
-    assert_stops(&home, &home.root, Some(&home.repo), &[]);
+    assert_stops(&home, &home.repo, None, &["src/lib.rs"]);
+    assert_stops(&home, &home.root, Some(&home.repo), &["src/lib.rs"]);
+}
+
+// SLICE-8-2
+#[test]
+fn staged_changes_do_not_stop_the_run() {
+    // The fake podman exits 125, so the run fails, but only after it started.
+    let home = Home::new("cli-staged");
+    stage_work(&home.repo);
+    let before = repo_state(&home.repo);
+    let task = home.task.display().to_string();
+
+    let out = home.slice(&home.repo, &["run", "test", "--task", &task, "--image", IMAGE]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        home.root.join("podman-called").exists(),
+        "the podman on PATH was run: {stderr}"
+    );
+    assert_eq!(repo_state(&home.repo), before, "nothing staged or changed");
+}
+
+// SLICE-9-5
+#[test]
+fn json_names_what_the_run_started_from() {
+    let home = Home::new("cli-json-start");
+    stage_work(&home.repo);
+    let head = git(&home.repo, &["rev-parse", "HEAD"]);
+    let task = home.task.display().to_string();
+
+    let out = home.slice(
+        &home.repo,
+        &["run", "test", "--task", &task, "--image", IMAGE, "--json"],
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    assert_eq!(value["outcome"], "failed");
+    assert_eq!(value["head"], serde_json::json!(head));
+    assert_eq!(value["staged"], serde_json::json!(STAGED_WORK));
 }
 
 // SLICE-8-2
@@ -307,6 +354,16 @@ fn missing_setup_exits_1() {
     git(&home.repo, &["rm", "-q", ".slice/test-agent.md"]);
     git(&home.repo, &["commit", "-q", "-m", "no prompt"]);
     assert_stops(&home, &home.repo, None, &[".slice/test-agent.md"]);
+
+    // The prompt's deletion staged, not committed.
+    let home = Home::new("cli-prompt-deletion-staged");
+    git(&home.repo, &["rm", "-q", ".slice/test-agent.md"]);
+    assert_stops(&home, &home.repo, None, &[".slice/test-agent.md"]);
+
+    // .slice.toml's deletion staged, not committed.
+    let home = Home::new("cli-toml-deletion-staged");
+    git(&home.repo, &["rm", "-q", ".slice.toml"]);
+    assert_stops(&home, &home.repo, None, &[".slice.toml"]);
 
     let home = Home::new("cli-no-globs");
     write(&home.repo, ".slice.toml", "[paths]\nsource = [\"src/**\"]\n");

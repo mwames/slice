@@ -213,6 +213,54 @@ pub fn staged(repo: &Path) -> Vec<String> {
     lines
 }
 
+/// The paths staged in the index against HEAD, sorted, without their
+/// status.
+pub fn staged_paths(repo: &Path) -> Vec<String> {
+    let mut paths: Vec<String> = git(repo, &["diff", "--cached", "--name-only", "--no-renames"])
+        .lines()
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Every file in the index, by path, with its staged contents.
+pub fn index_files(repo: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    for path in git(repo, &["ls-files"]).lines() {
+        let blob = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["cat-file", "blob", &format!(":{path}")])
+            .output()
+            .unwrap();
+        assert!(blob.status.success(), "git cat-file :{path}");
+        out.insert(path.to_string(), blob.stdout);
+    }
+    out
+}
+
+/// Stage work in `repo` without committing it: a change to README.md (outside
+/// both write sets), a change to tests/a.rs, a new tests/staged.rs and a new
+/// docs/staged.md, and the deletion of Cargo.toml.
+pub fn stage_work(repo: &Path) {
+    write(repo, "README.md", "# app, staged\n");
+    write(repo, "tests/a.rs", "#[test]\nfn a() {\n    // staged\n}\n");
+    write(repo, "tests/staged.rs", "// staged test\n");
+    write(repo, "docs/staged.md", "staged doc\n");
+    std::fs::remove_file(repo.join("Cargo.toml")).unwrap();
+    git(repo, &["add", "-A", "README.md", "tests", "docs", "Cargo.toml"]);
+}
+
+/// The paths `stage_work` stages, sorted.
+pub const STAGED_WORK: [&str; 5] = [
+    "Cargo.toml",
+    "README.md",
+    "docs/staged.md",
+    "tests/a.rs",
+    "tests/staged.rs",
+];
+
 /// A change an agent makes to its workspace.
 #[derive(Clone, Debug)]
 pub enum Edit {

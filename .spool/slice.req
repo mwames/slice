@@ -678,9 +678,9 @@ requirements:
     title: Agent Run
     description: >
       slice run test|impl --task <file> --image <tag> runs one agent on the
-      repository at HEAD in a Podman container that holds an export of
-      HEAD, not the repository, in which only the role's own paths can be
-      written. It writes the run's files to a new run directory and reads
+      repository's staged state (HEAD plus whatever is staged) in a Podman
+      container that holds an export of it, not the repository, in which
+      only the role's own paths can be written. It writes the run's files to a new run directory and reads
       back the agent's report and patch. The repository is the current
       directory, or --repo. The role prompts and path globs come from the
       repository's .slice.toml; the Linux Spool binary and the token's env
@@ -702,7 +702,13 @@ requirements:
       passed in, because each stack has its own build script, and building
       images is a separate concern. The prompts live in each repository,
       because what "done" means (the test, lint and format commands)
-      differs per stack.
+      differs per stack. The run starts from the index, not HEAD, so an
+      agent can be run again on top of staged work that hasn't been
+      approved yet: after a spec revision, the test agent updates the
+      tests it staged before, and the next review sees one staged diff.
+      Requiring a commit first would put unreviewed work into history, and
+      iterating is how a slice gets good. Unstaged changes are still
+      refused, so what the agent saw is exactly what is staged.
     superseded_by:
     out_of_scope:
       - Building images or the Linux Spool binary
@@ -713,6 +719,7 @@ requirements:
       - Removing old run directories
       - Committing the patch (SLICE-9 stages it; a person commits)
       - Retrying a failed or blocked run
+      - Running on unstaged changes (stage them first)
     acceptance_criteria:
       - id: SLICE-8-1
         title: Run Usage Errors
@@ -726,22 +733,25 @@ requirements:
           container, creates no run directory, and exits 2.
 
       - id: SLICE-8-2
-        title: Repository Must Be Clean
+        title: No Unstaged Changes
         status: active
         description: >
-          Given a repository with staged or unstaged changes to tracked
-          files, or a path that isn't a git repository,
+          Given a repository whose working tree differs from its index in
+          any tracked file (an unstaged change, including an unstaged
+          deletion), or a path that isn't a git repository,
           when slice run is run on it,
-          then it says so, starts no container, creates no run directory,
-          and exits 1. Untracked files don't count as changes.
+          then it says so, naming the unstaged paths, starts no container,
+          creates no run directory, and exits 1. Staged changes are allowed
+          and untracked files don't count as changes.
 
       - id: SLICE-8-3
         title: Setup Must Be Complete
         status: active
         description: >
-          Given a repository with no .slice.toml, a .slice.toml with no
+          Given a repository with no .slice.toml in the index (it is read
+          as staged, like the role prompt), a .slice.toml with no
           path globs for the role (test for test, source for impl), a role
-          prompt file that doesn't exist at HEAD, or a slice config with
+          prompt file that isn't in the index, or a slice config with
           no Spool binary path or a path that doesn't exist,
           when slice run is run on it,
           then it names what's missing, starts no container, creates no run
@@ -782,14 +792,15 @@ requirements:
         title: Workspace
         status: active
         description: >
-          Given a clean repository,
+          Given a repository with no unstaged changes,
           when slice run is run,
           then it creates a new run directory under
           $XDG_STATE_HOME/slice/runs (default ~/.local/state/slice/runs)
           whose name includes the role, holding a workspace with exactly
-          the files tracked at HEAD and their contents, a baseline of that
-          workspace in a git directory kept outside it, and a role
-          directory holding prompt.md (the role's prompt file as at HEAD),
+          the files in the index and their staged contents (so a staged
+          new file is there and a staged deletion is not), a baseline of
+          that workspace in a git directory kept outside it, and a role
+          directory holding prompt.md (the role's prompt file as staged),
           task.md (the --task file) and report.schema.json (the report
           schema built into slice).
 
@@ -802,7 +813,7 @@ requirements:
           then it runs the podman found on PATH with the given image, the
           role's model and the timeout,
           passes the env file by path, mounts the workspace writable at
-          /work, mounts read-only on top every file tracked at HEAD that
+          /work, mounts read-only on top every file in the index that
           isn't in the role's write set at /work/<path>, the role
           directory at /role, and the Spool binary at
           /usr/local/bin/spool, and runs claude with the task as the
@@ -850,8 +861,9 @@ requirements:
     description: >
       After an agent run, slice run checks every path the patch touches
       against the role's write set. A green report with a patch that
-      passes is staged in the repository with git apply --index and never
-      committed. Anything else stages nothing.
+      passes is staged in the repository with git apply --index, on top of
+      whatever was already staged, and never committed. Anything else
+      stages nothing.
     status: active
     interface: src/run.rs
     deciders:
@@ -882,10 +894,13 @@ requirements:
           paths in the role's write set,
           when the run finishes,
           then the patch is applied to the repository's working tree and
-          index, new files included, nothing is committed, and slice run
-          prints the report's status, summary, assumptions and files, the
-          cost, the duration in seconds to one decimal place (16.8 s for
-          16791 ms) and the run directory, and exits 0.
+          index, new files included, on top of the changes already staged,
+          nothing is committed, and slice run prints the report's status,
+          summary, assumptions and files, the cost, the duration in seconds
+          to one decimal place (16.8 s for 16791 ms), the run directory,
+          and what the run started from: HEAD's short hash, as git
+          rev-parse --short prints it, and the paths that were staged when
+          it started, if any. It exits 0.
 
       - id: SLICE-9-2
         title: Path Outside The Write Set
@@ -913,8 +928,9 @@ requirements:
         title: Repository Moved
         status: active
         description: >
-          Given HEAD changed, or tracked files were changed, while the
-          agent ran, or the patch otherwise doesn't apply (for example, it
+          Given HEAD changed, the index changed, or tracked files were
+          changed in the working tree while the agent ran, or the patch
+          otherwise doesn't apply (for example, it
           adds a file where an untracked file now sits),
           when the run finishes,
           then nothing is staged, slice run says why, keeps the patch in
@@ -930,8 +946,27 @@ requirements:
           "rejected", "blocked", "moved" or "failed"), "run_dir",
           "report" (the agent's report, or null when the run failed),
           "rejected_paths" ([] unless rejected), "cost_usd",
-          "duration_ms" and "turns" (null when unknown), and exits as
-          without --json.
+          "duration_ms" and "turns" (null when unknown), "head" (HEAD's
+          full hash when the run started) and "staged" (the paths staged
+          when it started, sorted, [] when none: every path whose index
+          entry differs from HEAD, staged deletions included, with a
+          rename listed as its two paths), both present for every
+          run that started a container, failed ones included, and exits as without
+          --json.
+
+      - id: SLICE-9-6
+        title: Run Again On Staged Work
+        status: active
+        description: >
+          Given a run's patch staged, and the same role run again with no
+          commit in between (for example, after a spec change, itself
+          staged or committed),
+          when the second run finishes green within the write set,
+          then its agent saw the first run's changes in the workspace, its
+          changes.patch holds only what it changed on top of them, and the
+          index then holds both: the staged diff against HEAD is the first
+          patch and the second combined, as if both agents' edits had been
+          made by hand and staged.
 
     invariants:
       - id: SLICE-9-INV-1
@@ -939,6 +974,7 @@ requirements:
         status: active
         description: >
           For every run, successful or not, slice run never commits,
-          never moves HEAD or a branch, and never stages a path outside
-          the role's write set; when it exits non-zero, the repository's
-          index and working tree are as they were before the run.
+          never moves HEAD or a branch, never unstages anything, and never
+          changes what is staged for a path outside the role's write set;
+          when it exits non-zero, the repository's index and working tree
+          are as they were before the run.
