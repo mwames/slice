@@ -49,6 +49,20 @@ fn role_is_test_or_impl() {
     }
 }
 
+/// A run refused because the working tree differs from the index, naming
+/// exactly `paths`.
+fn assert_unstaged(fake: &FakeContainers, request: &RunRequest, err: RunError, paths: &[&str]) {
+    let message = err.message();
+    let RunError::Dirty(unstaged) = err else {
+        panic!("refused as dirty, not {err:?}");
+    };
+    assert_eq!(unstaged.paths, strings(paths));
+    for p in paths {
+        assert!(message.contains(p), "names {p}: {message}");
+    }
+    assert_refused(fake, request);
+}
+
 // SLICE-8-2
 #[test]
 fn unstaged_change_to_a_tracked_file_is_refused() {
@@ -61,23 +75,21 @@ fn unstaged_change_to_a_tracked_file_is_refused() {
 
     assert!(matches!(err, RunError::Dirty(_)), "{err:?}");
     assert!(!err.message().trim().is_empty());
-    assert_refused(&fake, &request);
+    assert_unstaged(&fake, &request, err, &["src/lib.rs"]);
 }
 
 // SLICE-8-2
 #[test]
-fn staged_change_to_a_tracked_file_is_refused() {
-    let (root, repo) = repo("dirty-staged");
-    write(&repo, "README.md", "# app, changed\n");
-    git(&repo, &["add", "README.md"]);
-    let fake = FakeContainers::unused();
+fn staged_changes_are_allowed() {
+    let (root, repo) = repo("staged-allowed");
+    stage_work(&repo);
+    let fake = FakeContainers::reporting(vec![], green(&[]));
     let request = request(&root, &repo, Role::Impl);
 
-    let err = run(&fake, Ok(agent_settings(&root)), &request).unwrap_err();
+    let result = run(&fake, Ok(agent_settings(&root)), &request);
 
-    assert!(matches!(err, RunError::Dirty(_)), "{err:?}");
-    assert!(!err.message().trim().is_empty());
-    assert_refused(&fake, &request);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(fake.calls(), 1, "the container ran");
 }
 
 // SLICE-8-2
@@ -91,7 +103,31 @@ fn deleted_tracked_file_is_refused() {
     let err = run(&fake, Ok(agent_settings(&root)), &request).unwrap_err();
 
     assert!(matches!(err, RunError::Dirty(_)), "{err:?}");
-    assert_refused(&fake, &request);
+    assert_unstaged(&fake, &request, err, &["tests/a.rs"]);
+}
+
+// SLICE-8-2
+#[test]
+fn only_the_unstaged_paths_are_named_beside_staged_ones() {
+    // Staged work, a staged file changed again, a staged new file changed
+    // again, and an unstaged change and deletion.
+    let (root, repo) = repo("dirty-mixed");
+    stage_work(&repo);
+    write(&repo, "tests/a.rs", "// changed again after staging\n");
+    write(&repo, "docs/staged.md", "changed again after staging\n");
+    write(&repo, "src/lib.rs", "// unstaged\n");
+    std::fs::remove_file(repo.join("src/deep/mod.rs")).unwrap();
+    let fake = FakeContainers::unused();
+    let request = request(&root, &repo, Role::Test);
+
+    let err = run(&fake, Ok(agent_settings(&root)), &request).unwrap_err();
+
+    assert_unstaged(
+        &fake,
+        &request,
+        err,
+        &["docs/staged.md", "src/deep/mod.rs", "src/lib.rs", "tests/a.rs"],
+    );
 }
 
 // SLICE-8-2
@@ -200,8 +236,8 @@ fn missing_globs_for_the_role_are_named() {
 
 // SLICE-8-3
 #[test]
-fn role_prompt_missing_at_head_is_named() {
-    // The default prompt path, present in the working tree but not at HEAD.
+fn role_prompt_missing_from_the_index_is_named() {
+    // The default prompt path, present in the working tree but not tracked.
     let (root, repo) = repo("no-prompt-at-head");
     git(&repo, &["rm", "-q", "--cached", ".slice/test-agent.md"]);
     git(&repo, &["commit", "-q", "-m", "untrack the prompt"]);
@@ -225,6 +261,157 @@ fn role_prompt_missing_at_head_is_named() {
         ok_settings,
         &["prompts/impl.md"],
     );
+}
+
+// SLICE-8-3
+#[test]
+fn role_prompt_whose_deletion_is_staged_is_named() {
+    // At HEAD, but its deletion is staged: removed from the index and the
+    // working tree, or only from the index, leaving an untracked file.
+    for (name, cached) in [("prompt-deletion-staged", false), ("prompt-untracked-staged", true)] {
+        let (root, repo) = repo(name);
+        if cached {
+            git(&repo, &["rm", "-q", "--cached", ".slice/test-agent.md"]);
+        } else {
+            git(&repo, &["rm", "-q", ".slice/test-agent.md"]);
+        }
+        let fake = FakeContainers::unused();
+        let request = request(&root, &repo, Role::Test);
+
+        let err = run(&fake, Ok(agent_settings(&root)), &request).unwrap_err();
+
+        let RunError::Setup(what) = &err else {
+            panic!("{name}: a setup error, not {err:?}");
+        };
+        assert!(what.contains(".slice/test-agent.md"), "{name}: {what}");
+        assert_refused(&fake, &request);
+    }
+}
+
+// SLICE-8-3
+#[test]
+fn role_prompt_staged_but_not_committed_is_enough() {
+    let toml = "[paths]\ntest = [\"tests/**\"]\nsource = [\"src/**\"]\n[agent]\ntest_prompt = \"prompts/test.md\"\n";
+    let (root, repo) = repo_with("prompt-staged-new", Some(toml));
+    write(&repo, "prompts/test.md", "Staged test prompt.\n");
+    git(&repo, &["add", "prompts/test.md"]);
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test));
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        fake.seen().role.get("prompt.md").map(|b| b.as_slice()),
+        Some(b"Staged test prompt.\n".as_slice())
+    );
+}
+
+/// A run of `role` on `repo` refused for incomplete setup, whose message
+/// contains each of `names`.
+fn assert_setup_error_in(what: &str, root: &Path, repo: &Path, role: Role, names: &[&str]) {
+    let fake = FakeContainers::unused();
+    let request = request(root, repo, role);
+
+    let err = run(&fake, Ok(agent_settings(root)), &request).unwrap_err();
+
+    let RunError::Setup(said) = &err else {
+        panic!("{what}: a setup error, not {err:?}");
+    };
+    for n in names {
+        assert!(said.contains(n), "{what}: names {n:?}: {said}");
+        assert!(
+            err.message().contains(n),
+            "{what}: message names {n:?}: {}",
+            err.message()
+        );
+    }
+    assert_refused(&fake, &request);
+}
+
+// SLICE-8-3
+#[test]
+fn slice_toml_missing_from_the_index_is_named() {
+    // Committed, then its deletion staged: removed from the index and the
+    // working tree, or only from the index, leaving an untracked file.
+    for (name, cached) in [("toml-deletion-staged", false), ("toml-untracked-staged", true)] {
+        let (root, repo) = repo(name);
+        if cached {
+            git(&repo, &["rm", "-q", "--cached", ".slice.toml"]);
+        } else {
+            git(&repo, &["rm", "-q", ".slice.toml"]);
+        }
+        assert_setup_error_in(name, &root, &repo, Role::Test, &[".slice.toml"]);
+        assert_setup_error_in(name, &root, &repo, Role::Impl, &[".slice.toml"]);
+    }
+
+    // Never committed or staged, only in the working tree.
+    let (root, repo) = repo_with("toml-untracked", None);
+    write(&repo, ".slice.toml", SLICE_TOML);
+    assert_setup_error_in("toml-untracked", &root, &repo, Role::Test, &[".slice.toml"]);
+}
+
+// SLICE-8-3
+#[test]
+fn slice_toml_staged_but_not_committed_is_used() {
+    let (root, repo) = repo_with("toml-staged-new", None);
+    write(
+        &repo,
+        ".slice.toml",
+        "[paths]\ntest = [\"tests/**\"]\nsource = [\"src/**\"]\n[agent]\ntest_model = \"staged-model\"\ntimeout_secs = 60\n",
+    );
+    git(&repo, &["add", ".slice.toml"]);
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test));
+
+    assert!(result.is_ok(), "{result:?}");
+    let spec = fake.spec();
+    assert_eq!(spec.timeout_secs, 60);
+    let script = spec.command.join(" ");
+    assert!(script.contains("staged-model"), "{script}");
+    assert!(!script.contains("opus"), "{script}");
+}
+
+// SLICE-8-3
+#[test]
+fn staged_change_to_slice_toml_is_what_counts() {
+    // HEAD's has no test globs; the staged one adds them, with a model,
+    // while the working tree matches the index.
+    let (root, repo) = repo_with("toml-staged-change", Some("[paths]\nsource = [\"src/**\"]\n"));
+    write(
+        &repo,
+        ".slice.toml",
+        "[paths]\ntest = [\"tests/**\"]\nsource = [\"src/**\"]\n[agent]\ntest_model = \"staged-model\"\n",
+    );
+    git(&repo, &["add", ".slice.toml"]);
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test));
+
+    assert!(result.is_ok(), "{result:?}");
+    let script = fake.spec().command.join(" ");
+    assert!(script.contains("staged-model"), "{script}");
+    assert!(!script.contains("opus"), "{script}");
+
+    // HEAD's is complete; the staged one drops the test globs.
+    let (root, repo) = repo_with("toml-staged-no-globs", Some(SLICE_TOML));
+    write(&repo, ".slice.toml", "[paths]\nsource = [\"src/**\"]\n");
+    git(&repo, &["add", ".slice.toml"]);
+    assert_setup_error_in("toml-staged-no-globs", &root, &repo, Role::Test, &["test"]);
+}
+
+// SLICE-8-3
+// SLICE-8-4
+#[test]
+fn unknown_key_in_staged_slice_toml_is_named() {
+    let (root, repo) = repo("toml-staged-unknown-key");
+    write(
+        &repo,
+        ".slice.toml",
+        "[paths]\ntest = [\"tests/**\"]\nsource = [\"src/**\"]\nshared = [\"Cargo.toml\"]\n",
+    );
+    git(&repo, &["add", ".slice.toml"]);
+    assert_setup_error_in("toml-staged-unknown-key", &root, &repo, Role::Test, &["shared"]);
 }
 
 // SLICE-8-3
@@ -536,7 +723,7 @@ fn run_directory_is_new_and_named_for_the_role() {
 
 // SLICE-8-6
 #[test]
-fn workspace_holds_exactly_the_files_tracked_at_head() {
+fn workspace_holds_exactly_the_tracked_files() {
     let (root, repo) = repo("workspace");
     write(&repo, "notes.txt", "untracked\n");
     write(&repo, "target/debug/app", "ignored\n");
@@ -639,10 +826,54 @@ fn prompt_is_taken_from_head() {
     );
 }
 
-/// Asserts the spec's mounts for a run of `role` on the standard repository.
-fn assert_mounts(role: Role, writable: impl Fn(&str) -> bool) {
+// SLICE-8-6
+#[test]
+fn prompt_is_taken_from_the_index() {
+    // A staged change to the prompt, not committed.
+    let (root, repo) = repo("prompt-staged");
+    write(&repo, ".slice/test-agent.md", "Staged prompt.\n");
+    git(&repo, &["add", ".slice/test-agent.md"]);
     let fake = FakeContainers::reporting(vec![], green(&[]));
-    let (root, repo, _request, result) = run_on_repo("mounts", role, &fake);
+
+    run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(fake.seen().role.get("prompt.md").unwrap(), b"Staged prompt.\n");
+    assert_eq!(
+        fake.seen().workspace.get(".slice/test-agent.md").unwrap(),
+        b"Staged prompt.\n"
+    );
+}
+
+// SLICE-8-6
+#[test]
+fn workspace_holds_the_staged_state() {
+    // Staged changes, a staged new file and a staged deletion, beside
+    // untracked and ignored files.
+    let (root, repo) = repo("workspace-staged");
+    stage_work(&repo);
+    write(&repo, "notes.txt", "untracked\n");
+    write(&repo, "target/debug/app", "ignored\n");
+    let expected = index_files(&repo);
+    assert!(!expected.contains_key("Cargo.toml"));
+    assert_eq!(expected.get("tests/staged.rs").unwrap(), b"// staged test\n");
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+
+    run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(fake.seen().workspace, expected);
+}
+
+/// Asserts the spec's mounts for a run of `role` on the standard repository,
+/// with `stage_work` staged first if `with_staged`.
+fn assert_mounts(role: Role, with_staged: bool, writable: impl Fn(&str) -> bool) {
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+    let (root, repo) = repo("mounts");
+    if with_staged {
+        stage_work(&repo);
+    }
+    let index = index_files(&repo);
+    let result =
+        run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, role)).expect("the run starts a container");
     let settings = agent_settings(&root);
     let spec = fake.spec();
 
@@ -669,8 +900,12 @@ fn assert_mounts(role: Role, writable: impl Fn(&str) -> bool) {
         if let Some(path) = m.container.strip_prefix("/work/") {
             assert!(m.read_only, "{path} mounted read-only");
             assert!(m.host.starts_with(&result.run_dir), "{}", m.host.display());
-            let head = git(&repo, &["show", &format!("HEAD:{path}")]);
-            assert_eq!(read(&m.host).trim(), head, "{path} holds its contents at HEAD");
+            let staged = index.get(path).unwrap_or_else(|| panic!("{path} is in the index"));
+            assert_eq!(
+                &std::fs::read(&m.host).unwrap(),
+                staged,
+                "{path} holds its staged contents"
+            );
             read_only.push(path.to_string());
         } else {
             assert!(
@@ -696,13 +931,40 @@ fn assert_mounts(role: Role, writable: impl Fn(&str) -> bool) {
 // SLICE-8-7
 #[test]
 fn test_role_mounts_everything_but_tests_read_only() {
-    assert_mounts(Role::Test, |p| p.starts_with("tests/"));
+    assert_mounts(Role::Test, false, |p| p.starts_with("tests/"));
 }
 
 // SLICE-8-7
 #[test]
 fn impl_role_mounts_everything_but_source_read_only() {
-    assert_mounts(Role::Impl, |p| p.starts_with("src/"));
+    assert_mounts(Role::Impl, false, |p| p.starts_with("src/"));
+}
+
+// SLICE-8-7
+#[test]
+fn read_only_mounts_follow_the_index() {
+    assert_mounts(Role::Test, true, |p| p.starts_with("tests/"));
+    assert_mounts(Role::Impl, true, |p| p.starts_with("src/"));
+
+    // Spelled out: a staged new file outside the write set is mounted
+    // read-only with its staged contents, a staged deletion is not mounted,
+    // and a staged new file in the write set is writable.
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+    let (root, repo) = repo("mounts-staged");
+    stage_work(&repo);
+    run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+    let spec = fake.spec();
+    let doc = spec
+        .mounts
+        .iter()
+        .find(|m| m.container == "/work/docs/staged.md")
+        .expect("the staged new docs/staged.md is mounted");
+    assert!(doc.read_only);
+    assert_eq!(read(&doc.host), "staged doc\n");
+    let readme = mount_at(&spec, "/work/README.md").expect("README.md is mounted");
+    assert_eq!(read(&readme), "# app, staged\n");
+    assert_eq!(mount_at(&spec, "/work/Cargo.toml"), None, "a staged deletion");
+    assert_eq!(mount_at(&spec, "/work/tests/staged.rs"), None, "in the write set");
 }
 
 // SLICE-8-7
@@ -995,6 +1257,110 @@ fn staged_message_reports_the_run() {
     );
 }
 
+// SLICE-9-1
+#[test]
+fn green_patch_is_staged_on_top_of_staged_work() {
+    let (root, repo) = repo("staged-on-top");
+    stage_work(&repo);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let refs = git(&repo, &["for-each-ref"]);
+    let mut expected = index_files(&repo);
+    let edits = vec![
+        Edit::Write("tests/a.rs", "#[test]\nfn a() {\n    // staged, then the agent\n}\n"),
+        Edit::Write("tests/staged.rs", "// staged test, then the agent\n"),
+        Edit::Write("tests/new.rs", "// new from the agent\n"),
+    ];
+    let fake = FakeContainers::reporting(edits, green(&["tests/a.rs", "tests/staged.rs", "tests/new.rs"]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(result.outcome, Outcome::Staged);
+    assert_eq!(result.exit_code(), 0);
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head, "nothing committed");
+    assert_eq!(git(&repo, &["for-each-ref"]), refs, "no branch moved");
+    for (path, content) in [
+        ("tests/a.rs", "#[test]\nfn a() {\n    // staged, then the agent\n}\n"),
+        ("tests/staged.rs", "// staged test, then the agent\n"),
+        ("tests/new.rs", "// new from the agent\n"),
+    ] {
+        expected.insert(path.to_string(), content.as_bytes().to_vec());
+    }
+    assert_eq!(index_files(&repo), expected, "the patch on top of the staged work");
+    assert_eq!(
+        staged(&repo),
+        strings(&[
+            "A docs/staged.md",
+            "A tests/new.rs",
+            "A tests/staged.rs",
+            "D Cargo.toml",
+            "M README.md",
+            "M tests/a.rs",
+        ])
+    );
+    assert_eq!(
+        git(&repo, &["diff", "--name-only"]),
+        "",
+        "the working tree matches the index"
+    );
+    assert_eq!(read(&repo.join("tests/new.rs")), "// new from the agent\n");
+}
+
+// SLICE-9-1
+#[test]
+fn message_names_what_the_run_started_from() {
+    let (root, repo) = repo("started-from");
+    stage_work(&repo);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let short = git(&repo, &["rev-parse", "--short", "HEAD"]);
+    let fake = FakeContainers::reporting(vec![Edit::Write("tests/new.rs", "// new\n")], green(&["tests/new.rs"]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(result.outcome, Outcome::Staged);
+    assert_eq!(result.head, head);
+    assert_eq!(result.staged, strings(&STAGED_WORK));
+    let message = result.message();
+    assert_names_short_hash(&message, &short);
+    assert_says(&message, &STAGED_WORK);
+}
+
+/// The message names `short` on its own, not as the start of a longer hash.
+fn assert_names_short_hash(message: &str, short: &str) {
+    let hex = |c: Option<char>| c.is_some_and(|c| c.is_ascii_hexdigit());
+    let standalone = message
+        .match_indices(short)
+        .any(|(i, _)| !hex(message[..i].chars().next_back()) && !hex(message[i + short.len()..].chars().next()));
+    assert!(standalone, "names {short:?} as the short hash: {message}");
+}
+
+// SLICE-9-1
+#[test]
+fn message_names_head_as_rev_parse_short_prints_it() {
+    // A repository whose own config abbreviates hashes to 12 characters.
+    let (root, repo) = repo("started-from-abbrev");
+    git(&repo, &["config", "core.abbrev", "12"]);
+    let short = git(&repo, &["rev-parse", "--short", "HEAD"]);
+    assert_eq!(short.len(), 12);
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(result.outcome, Outcome::Staged);
+    assert_names_short_hash(&result.message(), &short);
+}
+
+// SLICE-9-1
+#[test]
+fn message_names_head_when_nothing_was_staged() {
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+    let (_root, repo, _request, result) = run_on_repo("started-from-head", Role::Impl, &fake);
+
+    assert_eq!(result.outcome, Outcome::Staged);
+    assert_eq!(result.head, git(&repo, &["rev-parse", "HEAD"]));
+    assert_eq!(result.staged, Vec::<String>::new());
+    assert_names_short_hash(&result.message(), &git(&repo, &["rev-parse", "--short", "HEAD"]));
+}
+
 /// A run of `role` whose `edits` touch paths outside its write set: nothing
 /// staged or changed, every such path listed, the patch kept, exit 1.
 fn assert_rejected(name: &str, slice_toml: &str, role: Role, edits: Vec<Edit>, status: &str, outside: &[&str]) {
@@ -1214,7 +1580,10 @@ fn assert_moved(name: &str, during: impl Fn(&Path) + 'static, prepare: impl FnOn
     assert_eq!(result.exit_code(), 1, "{name}");
     assert!(result.reason.is_some(), "{name}: why");
     assert!(!result.message().trim().is_empty(), "{name}");
-    assert_eq!(staged(&repo), Vec::<String>::new(), "{name}: nothing staged");
+    assert!(
+        !staged(&repo).iter().any(|l| l.ends_with(" tests/new.rs")),
+        "{name}: nothing of the patch staged"
+    );
     let patch = read(&result.run_dir.join("changes.patch"));
     assert!(patch.contains("// from the agent"), "{name}: patch kept: {patch}");
     (repo, root)
@@ -1232,6 +1601,7 @@ fn head_moved_during_the_run_stages_nothing() {
         },
         |_| {},
     );
+    assert_eq!(staged(&repo), Vec::<String>::new());
     assert!(!repo.join("tests/new.rs").exists());
     assert_eq!(git(&repo, &["log", "--oneline"]).lines().count(), 2);
 }
@@ -1244,6 +1614,7 @@ fn tracked_file_changed_during_the_run_stages_nothing() {
         |repo| write(repo, "README.md", "# app, edited meanwhile\n"),
         |_| {},
     );
+    assert_eq!(staged(&repo), Vec::<String>::new());
     assert!(!repo.join("tests/new.rs").exists());
     assert_eq!(read(&repo.join("README.md")), "# app, edited meanwhile\n");
 }
@@ -1257,11 +1628,72 @@ fn patch_that_does_not_apply_stages_nothing() {
         |_| {},
         |repo| write(repo, "tests/new.rs", "// someone else's untracked file\n"),
     );
+    assert_eq!(staged(&repo), Vec::<String>::new());
     assert_eq!(read(&repo.join("tests/new.rs")), "// someone else's untracked file\n");
     assert_eq!(
         git(&repo, &["status", "--porcelain", "--untracked-files=all"]),
         "?? tests/new.rs"
     );
+}
+
+// SLICE-9-4
+#[test]
+fn index_changed_during_the_run_stages_nothing() {
+    // More is staged while the agent runs, on top of staged work.
+    let (repo, _root) = assert_moved(
+        "moved-index-added",
+        |repo| {
+            write(repo, "docs/later.md", "staged during the run\n");
+            git(repo, &["add", "docs/later.md"]);
+        },
+        stage_work,
+    );
+    let mut expected: Vec<String> = STAGED_WORK.iter().map(|p| p.to_string()).collect();
+    expected.push("docs/later.md".into());
+    assert_eq!(staged_paths(&repo), sorted(expected));
+    assert!(!repo.join("tests/new.rs").exists());
+
+    // A staged change is unstaged while the agent runs.
+    let (repo, _root) = assert_moved(
+        "moved-index-reset",
+        |repo| {
+            git(repo, &["reset", "-q", "--", "README.md"]);
+        },
+        stage_work,
+    );
+    let expected: Vec<String> = STAGED_WORK
+        .iter()
+        .filter(|p| **p != "README.md")
+        .map(|p| p.to_string())
+        .collect();
+    assert_eq!(staged_paths(&repo), expected);
+    assert_eq!(read(&repo.join("README.md")), "# app, staged\n");
+    assert!(!repo.join("tests/new.rs").exists());
+}
+
+// SLICE-9-4
+#[test]
+fn repository_moved_under_staged_work_stages_nothing() {
+    // HEAD moved: the staged work committed while the agent runs.
+    let (repo, _root) = assert_moved(
+        "moved-head-staged",
+        |repo| {
+            git(repo, &["commit", "-q", "-m", "staged work committed meanwhile"]);
+        },
+        stage_work,
+    );
+    assert_eq!(staged(&repo), Vec::<String>::new());
+    assert!(!repo.join("tests/new.rs").exists());
+
+    // A tracked file changed in the working tree.
+    let (repo, _root) = assert_moved(
+        "moved-file-staged",
+        |repo| write(repo, "src/lib.rs", "// edited meanwhile\n"),
+        stage_work,
+    );
+    assert_eq!(staged_paths(&repo), strings(&STAGED_WORK));
+    assert_eq!(read(&repo.join("src/lib.rs")), "// edited meanwhile\n");
+    assert!(!repo.join("tests/new.rs").exists());
 }
 
 fn json_of(result: &RunResult) -> Value {
@@ -1275,7 +1707,7 @@ fn json_of(result: &RunResult) -> Value {
 fn json_for_a_staged_run() {
     let report = green(&["tests/new.rs"]);
     let fake = FakeContainers::reporting(vec![Edit::Write("tests/new.rs", "// new\n")], report.clone());
-    let (_root, _repo, _request, result) = run_on_repo("json-staged", Role::Test, &fake);
+    let (_root, repo, _request, result) = run_on_repo("json-staged", Role::Test, &fake);
 
     let value = json_of(&result);
     assert_eq!(value["outcome"], "staged");
@@ -1285,6 +1717,8 @@ fn json_for_a_staged_run() {
     assert_eq!(value["cost_usd"], json!(COST));
     assert_eq!(value["duration_ms"], json!(DURATION_MS));
     assert_eq!(value["turns"], json!(TURNS));
+    assert_eq!(value["head"], json!(git(&repo, &["rev-parse", "HEAD"])));
+    assert_eq!(value["staged"], json!([]));
 }
 
 // SLICE-9-5
@@ -1351,7 +1785,7 @@ fn json_for_a_failed_run() {
             stderr: String::new(),
         },
     );
-    let (_root, _repo, _request, result) = run_on_repo("json-failed", Role::Test, &fake);
+    let (_root, repo, _request, result) = run_on_repo("json-failed", Role::Test, &fake);
 
     let value = json_of(&result);
     assert_eq!(value["outcome"], "failed");
@@ -1361,6 +1795,8 @@ fn json_for_a_failed_run() {
     assert_eq!(value["cost_usd"], Value::Null);
     assert_eq!(value["duration_ms"], Value::Null);
     assert_eq!(value["turns"], Value::Null);
+    assert_eq!(value["head"], json!(git(&repo, &["rev-parse", "HEAD"])));
+    assert_eq!(value["staged"], json!([]));
     assert_eq!(result.exit_code(), 1);
 }
 
@@ -1382,4 +1818,201 @@ fn json_has_null_for_what_the_output_does_not_say() {
     assert_eq!(value["duration_ms"], Value::Null);
     assert_eq!(value["turns"], Value::Null);
     assert_eq!(result.exit_code(), 0);
+}
+
+// SLICE-9-5
+#[test]
+fn json_names_head_and_the_staged_paths() {
+    // Staged in an order other than sorted; the run is blocked, and still
+    // says what it started from.
+    let (root, repo) = repo("json-start");
+    write(&repo, "tests/z.rs", "// z\n");
+    git(&repo, &["add", "tests/z.rs"]);
+    stage_work(&repo);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let fake = FakeContainers::reporting(vec![], blocked(&[]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(result.outcome, Outcome::Blocked);
+    let mut expected = strings(&STAGED_WORK);
+    expected.push("tests/z.rs".into());
+    let value = json_of(&result);
+    assert_eq!(value["outcome"], "blocked");
+    assert_eq!(value["head"], json!(head));
+    assert_eq!(value["staged"], json!(sorted(expected)));
+}
+
+// SLICE-9-5
+#[test]
+fn json_staged_lists_every_path_whose_index_entry_differs_from_head() {
+    // A staged rename, a staged deletion, a staged mode change, and a change
+    // staged and then staged back to HEAD's contents.
+    use std::os::unix::fs::PermissionsExt;
+    let (root, repo) = repo("json-staged-entries");
+    git(&repo, &["mv", "tests/common/mod.rs", "tests/common/helpers.rs"]);
+    git(&repo, &["rm", "-q", "Cargo.toml"]);
+    std::fs::set_permissions(repo.join("README.md"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(&repo, &["add", "README.md"]);
+    write(&repo, "src/lib.rs", "// changed, then changed back\n");
+    git(&repo, &["add", "src/lib.rs"]);
+    write(&repo, "src/lib.rs", "pub fn f() -> u32 {\n    1\n}\n");
+    git(&repo, &["add", "src/lib.rs"]);
+    assert_eq!(
+        git(&repo, &["status", "--porcelain", "--untracked-files=no", "--", "src"]),
+        ""
+    );
+    let fake = FakeContainers::reporting(vec![], green(&[]));
+
+    let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    let value = json_of(&result);
+    assert_eq!(
+        value["staged"],
+        json!([
+            "Cargo.toml",
+            "README.md",
+            "tests/common/helpers.rs",
+            "tests/common/mod.rs"
+        ])
+    );
+}
+
+// SLICE-9-5
+#[test]
+fn json_names_head_and_the_staged_paths_whatever_the_outcome() {
+    let failing = |exit: ContainerExit, stdout: &str| {
+        FakeContainers::new(
+            vec![],
+            ContainerOutput {
+                exit,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            },
+        )
+    };
+    let cases: Vec<(&str, FakeContainers, &str)> = vec![
+        (
+            "staged",
+            FakeContainers::reporting(vec![Edit::Write("tests/new.rs", "// new\n")], green(&["tests/new.rs"])),
+            "staged",
+        ),
+        (
+            "rejected",
+            FakeContainers::reporting(vec![Edit::Write("src/sneaky.rs", "// sneaky\n")], green(&[])),
+            "rejected",
+        ),
+        ("blocked", FakeContainers::reporting(vec![], blocked(&[])), "blocked"),
+        ("moved", FakeContainers::reporting(vec![], green(&[])), "moved"),
+        (
+            "no-start",
+            failing(ContainerExit::FailedToStart("no such image".into()), ""),
+            "failed",
+        ),
+        (
+            "non-zero",
+            failing(ContainerExit::Exited(1), &claude_output(green(&[]))),
+            "failed",
+        ),
+        ("timed-out", failing(ContainerExit::TimedOut, ""), "failed"),
+        ("no-report", failing(ContainerExit::Exited(0), "not json"), "failed"),
+    ];
+    for (name, mut fake, outcome) in cases {
+        let (root, repo) = repo(&format!("json-start-{name}"));
+        stage_work(&repo);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        if name == "moved" {
+            let during_repo = repo.clone();
+            fake.during = Some(Box::new(move || write(&during_repo, "README.md", "# meanwhile\n")));
+        }
+
+        let result = run(&fake, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+        let value = json_of(&result);
+        assert_eq!(value["outcome"], outcome, "{name}: {value}");
+        assert_eq!(value["head"], json!(head), "{name}: {value}");
+        assert_eq!(value["staged"], json!(STAGED_WORK), "{name}: {value}");
+    }
+}
+
+// SLICE-9-6
+#[test]
+fn second_run_builds_on_the_first_runs_staged_patch() {
+    let (root, repo) = repo("run-again");
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    let first = FakeContainers::reporting(
+        vec![
+            Edit::Write("tests/a.rs", "#[test]\nfn a() {\n    // first run\n}\n"),
+            Edit::Write("tests/new.rs", "// first run\n"),
+            Edit::Delete("tests/common/mod.rs"),
+        ],
+        green(&["tests/a.rs", "tests/new.rs", "tests/common/mod.rs"]),
+    );
+    let one = run(&first, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+    assert_eq!(one.outcome, Outcome::Staged);
+
+    // The spec changes, and the change is staged.
+    write(&repo, ".spool/app.req", "feature: APP\n");
+    git(&repo, &["add", ".spool/app.req"]);
+    let second = FakeContainers::reporting(
+        vec![
+            Edit::Write("tests/new.rs", "// first run\n// second run\n"),
+            Edit::Write("tests/second.rs", "// second run\n"),
+        ],
+        green(&["tests/new.rs", "tests/second.rs"]),
+    );
+    let two = run(&second, Ok(agent_settings(&root)), &request(&root, &repo, Role::Test)).unwrap();
+
+    assert_eq!(two.outcome, Outcome::Staged);
+    assert_eq!(two.exit_code(), 0);
+    assert_eq!(two.head, head);
+    assert_eq!(
+        two.staged,
+        strings(&[".spool/app.req", "tests/a.rs", "tests/common/mod.rs", "tests/new.rs"])
+    );
+
+    // The second agent saw the first run's changes and the staged spec.
+    let seen = second.seen().workspace;
+    assert_eq!(
+        seen.get("tests/a.rs").unwrap(),
+        b"#[test]\nfn a() {\n    // first run\n}\n"
+    );
+    assert_eq!(seen.get("tests/new.rs").unwrap(), b"// first run\n");
+    assert!(!seen.contains_key("tests/common/mod.rs"));
+    assert_eq!(seen.get(".spool/app.req").unwrap(), b"feature: APP\n");
+
+    // Its patch holds only what it changed on top of them.
+    let patch = read(&two.run_dir.join("changes.patch"));
+    assert_eq!(
+        sorted(patch_paths(&patch)),
+        strings(&["tests/new.rs", "tests/second.rs"]),
+        "{patch}"
+    );
+    assert!(patch.contains("+// second run"), "{patch}");
+    assert!(!patch.contains("+// first run"), "{patch}");
+
+    // The index holds both, as if staged by hand.
+    assert_eq!(git(&repo, &["rev-parse", "HEAD"]), head, "nothing committed");
+    assert_eq!(
+        staged(&repo),
+        strings(&[
+            "A .spool/app.req",
+            "A tests/new.rs",
+            "A tests/second.rs",
+            "D tests/common/mod.rs",
+            "M tests/a.rs",
+        ])
+    );
+    let index = index_files(&repo);
+    assert_eq!(index.get("tests/new.rs").unwrap(), b"// first run\n// second run\n");
+    assert_eq!(index.get("tests/second.rs").unwrap(), b"// second run\n");
+    assert_eq!(
+        index.get("tests/a.rs").unwrap(),
+        b"#[test]\nfn a() {\n    // first run\n}\n"
+    );
+    assert_eq!(
+        git(&repo, &["diff", "--name-only"]),
+        "",
+        "the working tree matches the index"
+    );
 }

@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use common::agent::*;
@@ -36,6 +37,8 @@ struct Case {
     edits: Vec<(usize, bool)>,
     status: &'static str,
     ending: Ending,
+    /// Whether `stage_work` is staged before the run.
+    staged_first: bool,
 }
 
 fn case() -> impl Strategy<Value = Case> {
@@ -50,12 +53,14 @@ fn case() -> impl Strategy<Value = Case> {
             1 => Just(Ending::FailedToStart),
             1 => Just(Ending::NoReport),
         ],
+        any::<bool>(),
     )
-        .prop_map(|(role, edits, status, ending)| Case {
+        .prop_map(|(role, edits, status, ending, staged_first)| Case {
             role,
             edits,
             status,
             ending,
+            staged_first,
         })
 }
 
@@ -99,10 +104,14 @@ fn fake(case: &Case) -> FakeContainers {
     FakeContainers::new(edits, output)
 }
 
-/// A repository with untracked files beside the tracked ones, and settings
-/// whose env file holds `SECRET` and can't be read.
-fn setup(name: &str) -> (TempDir, std::path::PathBuf, AgentSettings) {
+/// A repository with untracked files beside the tracked ones, and staged work
+/// if `staged_first`, and settings whose env file holds `SECRET` and can't be
+/// read.
+fn setup(name: &str, staged_first: bool) -> (TempDir, std::path::PathBuf, AgentSettings) {
     let (root, repo) = repo(name);
+    if staged_first {
+        stage_work(&repo);
+    }
     write(&repo, "notes.txt", "untracked\n");
     let settings = agent_settings(&root);
     {
@@ -110,6 +119,17 @@ fn setup(name: &str) -> (TempDir, std::path::PathBuf, AgentSettings) {
         std::fs::set_permissions(&settings.env_file, std::fs::Permissions::from_mode(0o000)).unwrap();
     }
     (root, repo, settings)
+}
+
+/// The index entries in `git ls-files --stage` output, by path.
+fn index_entries(index: &str) -> BTreeMap<String, String> {
+    index
+        .lines()
+        .map(|l| {
+            let (entry, path) = l.split_once('\t').unwrap();
+            (path.to_string(), entry.to_string())
+        })
+        .collect()
 }
 
 fn contains(haystack: &[u8], needle: &str) -> bool {
@@ -135,7 +155,7 @@ proptest! {
     // SLICE-8-INV-1
     #[test]
     fn container_never_sees_the_repository(case in case()) {
-        let (_root, repo, settings) = setup("inv-mounts");
+        let (_root, repo, settings) = setup("inv-mounts", case.staged_first);
         let fake = fake(&case);
         let request = request(&_root, &repo, case.role);
 
@@ -153,8 +173,9 @@ proptest! {
     // SLICE-9-INV-1
     #[test]
     fn only_the_write_set_is_staged(case in case()) {
-        let (_root, repo, settings) = setup("inv-staging");
+        let (_root, repo, settings) = setup("inv-staging", case.staged_first);
         let before = repo_state(&repo);
+        let staged_before = staged_paths(&repo);
         let fake = fake(&case);
         let request = request(&_root, &repo, case.role);
 
@@ -165,7 +186,23 @@ proptest! {
         prop_assert_eq!(&after.refs, &before.refs, "no branch moves, nothing is committed");
         for line in staged(&repo) {
             let path = line.split_once(' ').unwrap().1;
-            prop_assert!(writable(case.role, path), "{} staged for {:?}", path, case.role);
+            prop_assert!(
+                writable(case.role, path) || staged_before.iter().any(|p| p == path),
+                "{} staged for {:?}", path, case.role
+            );
+        }
+        let staged_after = staged_paths(&repo);
+        for path in &staged_before {
+            prop_assert!(staged_after.contains(path), "{} is still staged", path);
+        }
+        let (entries_before, entries_after) = (index_entries(&before.index), index_entries(&after.index));
+        for path in entries_before.keys().chain(entries_after.keys()) {
+            if !writable(case.role, path) {
+                prop_assert_eq!(
+                    entries_before.get(path), entries_after.get(path),
+                    "what is staged for {} is unchanged", path
+                );
+            }
         }
         if result.exit_code() != 0 {
             prop_assert_eq!(&after, &before, "the repository is as it was");
