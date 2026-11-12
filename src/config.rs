@@ -142,7 +142,24 @@ impl Config {
     }
 
     fn branch_templates(&self) -> Result<Vec<(PathBuf, BranchTemplate)>, String> {
-        todo!("SLICE-11-7")
+        let mut templates = Vec::new();
+        for (i, entry) in self.repos.iter().enumerate() {
+            let path = entry.path.as_deref().filter(|p| !p.trim().is_empty());
+            let name = path.map_or_else(
+                || format!("[[repos]] entry {}", i + 1),
+                |p| format!("[[repos]] entry {p}"),
+            );
+            let Some(path) = path else {
+                return Err(format!("{name} has no path"));
+            };
+            let Some(branch) = entry.branch.as_deref() else {
+                return Err(format!("{name} has no branch template"));
+            };
+            let template = BranchTemplate::parse(branch)
+                .map_err(|e| format!("{name}: invalid branch template {branch:?}: {e}"))?;
+            templates.push((expand_home(path), template));
+        }
+        Ok(templates)
     }
 
     /// The agent settings for slice run, or an error naming what's missing:

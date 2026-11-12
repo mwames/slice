@@ -82,7 +82,48 @@ impl BranchName {
 /// `{date}`, `{yyyy}`, `{mm}`, `{dd}`, `{ticket}` and `{title}` (SLICE-11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchTemplate {
-    text: String,
+    tokens: Vec<Token>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Token {
+    Literal(String),
+    Type,
+    Date,
+    Yyyy,
+    Mm,
+    Dd,
+    Ticket,
+    Title,
+}
+
+impl Token {
+    fn placeholder(name: &str) -> Option<Token> {
+        Some(match name {
+            "type" => Token::Type,
+            "date" => Token::Date,
+            "yyyy" => Token::Yyyy,
+            "mm" => Token::Mm,
+            "dd" => Token::Dd,
+            "ticket" => Token::Ticket,
+            "title" => Token::Title,
+            _ => return None,
+        })
+    }
+
+    /// The number of digits a date placeholder matches.
+    fn width(&self) -> Option<usize> {
+        match self {
+            Token::Date => Some(8),
+            Token::Yyyy => Some(4),
+            Token::Mm | Token::Dd => Some(2),
+            _ => None,
+        }
+    }
+
+    fn is_placeholder(&self) -> bool {
+        !matches!(self, Token::Literal(_))
+    }
 }
 
 impl BranchTemplate {
@@ -91,13 +132,57 @@ impl BranchTemplate {
 
     /// Check a template, or say what is wrong with it (SLICE-11-7).
     pub fn parse(text: &str) -> Result<BranchTemplate, String> {
-        let _ = text;
-        todo!("SLICE-11-7")
+        let mut tokens: Vec<Token> = Vec::new();
+        let mut literal = String::new();
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            match c {
+                '{' => {
+                    let end = rest.find('}').ok_or("unmatched `{`")?;
+                    let name = &rest[1..end];
+                    if name.contains('{') {
+                        return Err("unmatched `{`".to_string());
+                    }
+                    let Some(token) = Token::placeholder(name) else {
+                        return Err(format!("unknown placeholder {{{name}}}"));
+                    };
+                    if tokens.contains(&token) {
+                        return Err(format!("{{{name}}} is used more than once"));
+                    }
+                    if !literal.is_empty() {
+                        tokens.push(Token::Literal(std::mem::take(&mut literal)));
+                    }
+                    tokens.push(token);
+                    rest = &rest[end + 1..];
+                }
+                '}' => return Err("unmatched `}`".to_string()),
+                _ => {
+                    literal.push(c);
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+        }
+        if !literal.is_empty() {
+            tokens.push(Token::Literal(literal));
+        }
+        if !tokens.contains(&Token::Ticket) {
+            return Err("it lacks {ticket}".to_string());
+        }
+        if !tokens.contains(&Token::Title) {
+            return Err("it lacks {title}".to_string());
+        }
+        let adjacent = tokens.windows(2).any(|w| {
+            w[0].is_placeholder() && w[1].is_placeholder() && w[0].width().is_none() && w[1].width().is_none()
+        });
+        if adjacent {
+            return Err("two placeholders next to each other can't be told apart".to_string());
+        }
+        Ok(BranchTemplate { tokens })
     }
 
     /// Whether names from this template carry a type (SLICE-11-6).
     pub fn has_type(&self) -> bool {
-        todo!("SLICE-11-6")
+        self.tokens.contains(&Token::Type)
     }
 
     /// The branch name for `name`'s parts. `name` has a type when the
@@ -105,16 +190,135 @@ impl BranchTemplate {
     /// An empty short title drops `{title}` and the literal text directly
     /// before it (SLICE-11-8).
     pub fn render(&self, name: &BranchName) -> String {
-        let _ = name;
-        todo!("SLICE-11-2")
+        let tokens = if name.short_title.is_empty() {
+            self.without_title()
+        } else {
+            self.tokens.clone()
+        };
+        let date = name.date.as_deref().unwrap_or_default();
+        let part = |from: usize, to: usize| date.get(from..to).unwrap_or_default();
+        let mut out = String::new();
+        for token in &tokens {
+            match token {
+                Token::Literal(text) => out.push_str(text),
+                Token::Type => out.push_str(name.branch_type.as_ref().map_or("", |t| t.0.as_str())),
+                Token::Date => out.push_str(date),
+                Token::Yyyy => out.push_str(part(0, 4)),
+                Token::Mm => out.push_str(part(4, 6)),
+                Token::Dd => out.push_str(part(6, 8)),
+                Token::Ticket => out.push_str(&name.ticket.0),
+                Token::Title => out.push_str(&name.short_title),
+            }
+        }
+        out
+    }
+
+    /// The tokens without `{title}` and the literal directly before it.
+    fn without_title(&self) -> Vec<Token> {
+        let mut tokens = self.tokens.clone();
+        if let Some(at) = tokens.iter().position(|t| *t == Token::Title) {
+            tokens.remove(at);
+            if at > 0 && !tokens[at - 1].is_placeholder() {
+                tokens.remove(at - 1);
+            }
+        }
+        tokens
     }
 
     /// `branch`'s parts when the whole name matches the template
     /// (SLICE-11-3, 11-4).
     pub fn recognize(&self, branch: &str) -> Option<BranchName> {
-        let _ = branch;
-        todo!("SLICE-11-3")
+        let mut caps = Vec::new();
+        if !matches(&self.tokens, branch, &mut caps) {
+            caps.clear();
+            if !matches(&self.without_title(), branch, &mut caps) {
+                return None;
+            }
+        }
+        let mut name = BranchName {
+            branch_type: None,
+            date: None,
+            ticket: TicketRef(String::new()),
+            short_title: String::new(),
+        };
+        let (mut yyyy, mut mm, mut dd) = (None, None, None);
+        for (token, text) in caps {
+            let text = text.to_string();
+            match token {
+                Token::Type => name.branch_type = Some(BranchType(text)),
+                Token::Date => name.date = Some(text),
+                Token::Yyyy => yyyy = Some(text),
+                Token::Mm => mm = Some(text),
+                Token::Dd => dd = Some(text),
+                Token::Ticket => name.ticket = TicketRef(text),
+                Token::Title => name.short_title = text,
+                Token::Literal(_) => {}
+            }
+        }
+        if let (Some(y), Some(m), Some(d)) = (yyyy, mm, dd) {
+            name.date.get_or_insert(format!("{y}{m}{d}"));
+        }
+        Some(name)
     }
+}
+
+/// Match `tokens` against all of `s`, trying every length a variable-width
+/// placeholder can take, and record what each placeholder matched.
+fn matches<'a>(tokens: &[Token], s: &'a str, caps: &mut Vec<(Token, &'a str)>) -> bool {
+    let Some((token, rest)) = tokens.split_first() else {
+        return s.is_empty();
+    };
+    let ends: Vec<usize> = match token {
+        Token::Literal(text) => {
+            return s
+                .strip_prefix(text.as_str())
+                .is_some_and(|tail| matches(rest, tail, caps));
+        }
+        Token::Type => {
+            let run = s.bytes().take_while(u8::is_ascii_lowercase).count();
+            (1..=run).collect()
+        }
+        Token::Ticket => ticket_ends(s),
+        Token::Title => s
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(s.len()))
+            .collect(),
+        fixed => {
+            let width = fixed.width().expect("a date placeholder");
+            if s.len() >= width && s.as_bytes()[..width].iter().all(u8::is_ascii_digit) {
+                vec![width]
+            } else {
+                vec![]
+            }
+        }
+    };
+    for end in ends {
+        caps.push((token.clone(), &s[..end]));
+        if matches(rest, &s[end..], caps) {
+            return true;
+        }
+        caps.pop();
+    }
+    false
+}
+
+/// The lengths of the ticket references `s` starts with: uppercase letters
+/// and digits starting with a letter, a hyphen, then one or more digits.
+fn ticket_ends(s: &str) -> Vec<usize> {
+    let bytes = s.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_uppercase) {
+        return Vec::new();
+    }
+    let word = bytes
+        .iter()
+        .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        .count();
+    if bytes.get(word) != Some(&b'-') {
+        return Vec::new();
+    }
+    let digits = bytes[word + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
+    (1..=digits).map(|n| word + 1 + n).collect()
 }
 
 impl Default for BranchTemplate {
@@ -232,8 +436,32 @@ impl Settings {
     /// main working tree, as a whole path; `*` matches within one path
     /// segment. The default when none does (SLICE-11-1, 11-5).
     pub fn template_for(&self, repo: &Path) -> BranchTemplate {
-        let _ = repo;
-        todo!("SLICE-11-5")
+        self.branch_templates
+            .iter()
+            .find(|(pattern, _)| path_matches(pattern, repo))
+            .map(|(_, template)| template.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Whether `path` matches `pattern` segment by segment, where `*` matches
+/// any characters within one segment.
+fn path_matches(pattern: &Path, path: &Path) -> bool {
+    let segments = |p: &Path| {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let (pattern, path) = (segments(pattern), segments(path));
+    pattern.len() == path.len() && pattern.iter().zip(&path).all(|(p, s)| glob(p, s))
+}
+
+fn glob(pattern: &str, text: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == text,
+        Some((head, tail)) => text
+            .strip_prefix(head)
+            .is_some_and(|rest| (0..=rest.len()).any(|i| rest.is_char_boundary(i) && glob(tail, &rest[i..]))),
     }
 }
 
@@ -517,10 +745,8 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
         Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
         None => {
             let template = deps.settings.template_for(&request.repo);
-            let Some(branch_type) = &request.branch_type else {
-                return Err(SliceError::TypeRequired);
-            };
-            let branch = template.render(&BranchName::new(Some(branch_type), deps.today, &ticket));
+            let branch_type = new_branch_type(&template, request.branch_type.as_ref())?;
+            let branch = template.render(&BranchName::new(branch_type, deps.today, &ticket));
             plan_new(deps, request, branch, &worktree_root)?
         }
     };
@@ -599,6 +825,19 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
     }
 }
 
+/// The type a new branch is named with: the request's when the template has
+/// `{type}`, and required then; none otherwise (SLICE-11-6).
+fn new_branch_type<'a>(
+    template: &BranchTemplate,
+    requested: Option<&'a BranchType>,
+) -> Result<Option<&'a BranchType>, SliceError> {
+    match (template.has_type(), requested) {
+        (false, _) => Ok(None),
+        (true, None) => Err(SliceError::TypeRequired),
+        (true, Some(t)) => Ok(Some(t)),
+    }
+}
+
 /// The one branch in `repo` for the ticket, if any; more than one is
 /// refused (SLICE-2-12).
 fn existing_branch(deps: &Deps, repo: &Path, ticket: &TicketRef) -> Result<Option<String>, SliceError> {
@@ -626,10 +865,11 @@ fn plan_existing(deps: &Deps, request: &OpenRequest, branch: String, worktree_ro
     let preflight = |e| failed(Step::Preflight, e);
     let template = deps.settings.template_for(&request.repo);
     let parsed = template.recognize(&branch).expect("filtered on recognize");
-    let type_differs = request
-        .branch_type
-        .as_ref()
-        .is_some_and(|t| Some(t) != parsed.branch_type.as_ref());
+    let type_differs = template.has_type()
+        && request
+            .branch_type
+            .as_ref()
+            .is_some_and(|t| Some(t) != parsed.branch_type.as_ref());
     if request.base.is_some() || type_differs {
         return Err(SliceError::BranchOptionsConflict { branch });
     }
@@ -734,19 +974,34 @@ fn add_repo(
     let (branch, worktree, base_commit, checkout) = match existing_branch(deps, &request.repo, &slice.ticket)? {
         Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
         None => {
-            // A new branch takes the slice's name, and so its type.
+            // A new branch is written with this repository's template from
+            // the parts of the slice's first branch.
+            let template = deps.settings.template_for(&request.repo);
             let first_name = deps.settings.template_for(&first.repo).recognize(&first.branch);
-            let type_differs = request
-                .branch_type
-                .as_ref()
-                .zip(first_name)
-                .is_some_and(|(t, n)| Some(t) != n.branch_type.as_ref());
-            if type_differs {
-                return Err(SliceError::BranchOptionsConflict {
-                    branch: first.branch.clone(),
-                });
-            }
-            plan_new(deps, request, first.branch.clone(), &worktree_root)?
+            let branch = match first_name {
+                Some(first_name) => {
+                    let first_type = first_name.branch_type.as_ref();
+                    let type_differs = template.has_type()
+                        && first_type.is_some_and(|f| request.branch_type.as_ref().is_some_and(|t| t != f));
+                    if type_differs {
+                        return Err(SliceError::BranchOptionsConflict {
+                            branch: first.branch.clone(),
+                        });
+                    }
+                    let branch_type = match first_type {
+                        Some(t) if template.has_type() => Some(t),
+                        _ => new_branch_type(&template, request.branch_type.as_ref())?,
+                    };
+                    template.render(&BranchName {
+                        branch_type: branch_type.cloned(),
+                        date: Some(first_name.date.clone().unwrap_or_else(|| deps.today.to_string())),
+                        ticket: slice.ticket.clone(),
+                        short_title: first_name.short_title.clone(),
+                    })
+                }
+                None => first.branch.clone(),
+            };
+            plan_new(deps, request, branch, &worktree_root)?
         }
     };
     let manifest = match deps.state.read_manifest(&slice.id) {
