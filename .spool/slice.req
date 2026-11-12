@@ -1296,5 +1296,5 @@ requirements:
           then R's new branch is R's template written with the type, date,
           ticket and title B was named with; where B's template has no
           {type} and R's does, the type is --type, and without --type it
-          fails as in SLICE-2-11; and where B's template has no date, the
-          date is today.
+          fails as in SLICE-2-11; and where B's name gives no full date
+          ({date}, or {yyyy}, {mm} and {dd}), the date is today.
