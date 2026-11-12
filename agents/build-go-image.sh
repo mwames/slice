@@ -22,7 +22,9 @@ ctx=$(mktemp -d)
 # Module cache files are read-only; make them removable before cleaning up.
 trap 'chmod -R u+w "$ctx" 2>/dev/null; rm -rf "$ctx"' EXIT
 
-(cd "$repo" && GOMODCACHE="$ctx/modcache" GOFLAGS=-modcacherw go mod download)
+# GOWORK=off: a local go.work could point a module at a checkout on the host,
+# and the module would then be missing from the image.
+(cd "$repo" && GOWORK=off GOMODCACHE="$ctx/modcache" GOFLAGS=-modcacherw go mod download)
 cp "$here/go/Containerfile" "$ctx/"
 
 podman build --build-arg CLAUDE_VERSION="$claude_version" --tag "$tag" "$ctx" >&2
