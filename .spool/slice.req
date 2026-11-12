@@ -145,7 +145,8 @@ requirements:
         status: active
         description: >
           Given an active slice for ticket T with its timer running,
-          when slice open is run with ticket T,
+          when slice open is run with ticket T in a repository already in
+          the slice,
           then it reports that the slice is already open, changes nothing,
           and exits zero.
 
@@ -225,7 +226,8 @@ requirements:
         status: active
         description: >
           Given an active slice for ticket T and no running Harvest timer,
-          when slice open is run with ticket T,
+          when slice open is run with ticket T in a repository already in
+          the slice,
           then T's entry for today is running, restarted if it exists and
           started otherwise,
           the ticket, branch, worktree, and manifest are unchanged,
@@ -248,8 +250,9 @@ requirements:
           created still exists, every entry that existed before is still
           there and running or stopped as it was, no branch or worktree it
           created still exists, every branch and worktree that existed
-          before still does, no manifest exists for the slice, and the
-          ticket's status is what it was before the run.
+          before still does, no manifest it created still exists and any
+          manifest that existed before is as it was, the active slice is as
+          it was, and the ticket's status is what it was before the run.
 
   - id: SLICE-3
     title: Slice Pause
@@ -978,3 +981,163 @@ requirements:
           changes what is staged for a path outside the role's write set;
           when it exits non-zero, the repository's index and working tree
           are as they were before the run.
+
+  - id: SLICE-10
+    title: Multi-Repository Slice
+    description: >
+      A slice can span several repositories, each with its own branch,
+      worktree and base commit. Running slice open with the active
+      slice's ticket in a repository the slice doesn't have yet adds that
+      repository to the slice, at any point while the slice is active.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-12
+    rationale: >
+      Some tickets need changes in more than one repository, and which
+      ones often isn't known until the work is under way, so a slice
+      can't require its repositories up front. Opening in the new
+      repository is the natural gesture, and it used to report the slice
+      already open while leaving that repository without a branch.
+      The ticket, timer, ticket status and slice id stay per slice; only
+      the branch, worktree and base commit are per repository. Every
+      repository gets the same branch name, the one in the repository the
+      slice was opened in, so the merge requests line up and a repository
+      added on a later day doesn't get a different date. A repository that
+      already has a branch for the ticket, from an earlier slice, keeps
+      it. A repository is identified by its main working tree, so running
+      from one of its worktrees, which is where slice work happens, names
+      the same repository rather than placing worktrees inside a
+      worktree. A later slice of the same ticket starts with the
+      repository it is opened in and gains the others the same way,
+      picking up their existing branches. Close, abandon, pause and
+      resume act on the slice and leave every repository's branch and
+      worktree as they are. State written before this change has one
+      repository and must keep working, since a slice may be active when
+      slice is upgraded.
+    superseded_by:
+    out_of_scope:
+      - Removing a repository from a slice
+      - Pushing, or opening merge requests, across repositories
+      - Which repository owns the spec, and locking or verifying across
+        repositories
+      - Running agents across repositories; slice run works in one
+    acceptance_criteria:
+      - id: SLICE-10-1
+        title: Repository Added
+        status: active
+        description: >
+          Given an active slice for T opened in repository A, with its
+          timer running, and a repository R not in the slice that has no
+          branch for T,
+          when slice open is run with T in R,
+          then R has a branch with the name of A's branch for the slice,
+          based on --base or R's HEAD, and its worktree; the manifest and
+          the active slice list A and R, each with its branch, worktree and
+          base commit; A's entry, the timer, the Harvest entry and the
+          ticket status are unchanged; it reports the repository added with
+          its branch and worktree; and it exits zero.
+
+      - id: SLICE-10-2
+        title: Type Taken From The Slice
+        status: active
+        description: >
+          Given the starting state of SLICE-10-1,
+          when slice open is run with T in R with no --type, or with the
+          type of A's branch,
+          then R is added as in SLICE-10-1; and when it is run with any
+          other --type,
+          then it fails, names A's branch, changes nothing, and exits
+          non-zero.
+
+      - id: SLICE-10-3
+        title: Existing Branch In Added Repository
+        status: active
+        description: >
+          Given an active slice for T and a repository R not in the slice
+          that has exactly one branch for T, with any date or type in its
+          name, with or without its worktree,
+          when slice open is run with T in R without --base,
+          then R is added with that branch, its worktree exists, creating
+          it if missing, no branch is created, and R's base commit is the
+          branch's head; with --base it fails as in SLICE-2-10, and with
+          more than one branch for T in R it fails as in SLICE-2-12.
+
+      - id: SLICE-10-4
+        title: Adding Restarts A Stopped Timer
+        status: active
+        description: >
+          Given an active slice for T with no running Harvest timer and a
+          repository R not in the slice,
+          when slice open is run with T in R,
+          then R is added as in SLICE-10-1 or SLICE-10-3 and T's entry for
+          today is running, restarted if it exists and started otherwise.
+
+      - id: SLICE-10-5
+        title: Adding Refused On Mismatch
+        status: active
+        description: >
+          Given an active slice for T and a running Harvest timer for
+          another ticket or for no ticket,
+          when slice open is run with T in a repository not in the slice,
+          then it reports the mismatch with both values, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-10-6
+        title: Failed Add Undone
+        status: active
+        description: >
+          Given a step of adding repository R fails after an earlier step
+          of the same run succeeded,
+          when slice open is run with T in R,
+          then the earlier steps are undone in reverse order, removing a
+          branch or worktree only if this run created it and stopping an
+          entry only if this run restarted or started it, the manifest and
+          the active slice list the repositories they listed before, it
+          reports which step failed, and it exits non-zero.
+
+      - id: SLICE-10-7
+        title: Worktree Names Its Repository
+        status: active
+        description: >
+          Given a directory inside a worktree of repository R, whether the
+          current directory or --repo,
+          when slice open is run from it,
+          then the request is for R: the branch is looked for, and the
+          worktree created, as they would be when running in R's main
+          working tree, and a slice whose repositories include R treats it
+          as already present.
+
+      - id: SLICE-10-8
+        title: Status Lists Repositories
+        status: active
+        description: >
+          Given an active slice with one or more repositories,
+          when status, open, pause, resume, close or abandon reports the
+          slice,
+          then each repository is listed with its path, branch and
+          worktree, in the order they were added, in both text and JSON.
+
+      - id: SLICE-10-9
+        title: Earlier State Read
+        status: active
+        description: >
+          Given an active slice and its manifest written by slice before
+          this change, holding one repository, branch, worktree and base
+          commit,
+          when any slice command runs,
+          then the slice reads as having that one repository, with that
+          branch, worktree and base commit, and repositories can be added
+          to it; and every manifest written before this change still reads.
+
+    invariants:
+      - id: SLICE-10-INV-1
+        title: Other Repositories Untouched
+        status: active
+        description: >
+          For every run of slice open that adds a repository or fails to,
+          every repository already in the slice keeps its branch, worktree
+          and base commit, and its branch and worktree are unchanged on
+          disk.
