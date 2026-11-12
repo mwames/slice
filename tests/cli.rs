@@ -156,3 +156,23 @@ fn reason_on_other_commands_is_a_usage_error() {
         assert_usage_error(&format!("other-{i}"), &args);
     }
 }
+
+// SLICE-11-7
+#[test]
+fn invalid_branch_template_refused_by_any_command() {
+    let home = home("bad-template");
+    std::fs::write(
+        home.join("config/slice/config.toml"),
+        "[[repos]]\npath = \"/srv/provision/*\"\nbranch = \"{type}/{date}-{title}\"\n",
+    )
+    .unwrap();
+    let before = files(&home);
+
+    let out = slice(&home, &["status"]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "exit code; stderr: {stderr}");
+    assert!(stderr.contains("/srv/provision/*"), "names the entry: {stderr}");
+    assert!(stderr.contains("ticket"), "names the problem: {stderr}");
+    assert_eq!(files(&home), before, "nothing changed");
+}

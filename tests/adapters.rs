@@ -298,7 +298,7 @@ fn manifests_kept_in_state_by_slice_id() {
 
 #[test]
 fn config_defaults_and_overrides() {
-    let defaults = Config::parse("").unwrap().settings();
+    let defaults = Config::parse("").unwrap().settings().unwrap();
     assert_eq!(
         defaults.in_progress,
         Statuses {
@@ -326,7 +326,7 @@ fn config_defaults_and_overrides() {
         "worktree_root = \"/tmp/slices\"\n[status.in_progress]\nclickup = \"doing\"\n[status.done]\nmonday = \"Shipped\"\n[harvest]\nproject = \"P\"\ntask = \"T\"\n",
     )
     .unwrap();
-    let s = cfg.settings();
+    let s = cfg.settings().unwrap();
     assert_eq!(s.in_progress.clickup, "doing");
     assert_eq!(s.in_progress.monday, "In Progress");
     assert_eq!(s.done.monday, "Shipped");

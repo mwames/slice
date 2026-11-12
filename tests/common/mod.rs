@@ -50,6 +50,7 @@ pub fn settings() -> Settings {
             monday: "Done".into(),
         },
         worktree_root: None,
+        branch_templates: Vec::new(),
     }
 }
 
@@ -189,6 +190,13 @@ impl Fake {
         }
     }
 
+    /// A config entry giving the repository at `path` the branch template
+    /// `text`, after any entries already there (SLICE-11).
+    pub fn with_template(&mut self, path: &str, text: &str) {
+        let template = BranchTemplate::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        self.settings.branch_templates.push((PathBuf::from(path), template));
+    }
+
     /// Add an entry and return its id.
     pub fn add_entry(&self, ticket: Option<&str>, running: bool, today: bool) -> TimerId {
         let mut w = self.world.borrow_mut();
@@ -282,9 +290,14 @@ impl Fake {
     /// it, on its branch from yesterday, with an entry for the ticket today
     /// that is running or stopped.
     pub fn with_active_slice(&self, ticket: &str, timer_running: bool) -> ActiveSlice {
-        self.add_entry(Some(ticket), timer_running, true);
         let title = self.world.borrow().tickets[ticket].title.to_lowercase();
-        let branch = format!("feature/20261101-{ticket}-{title}");
+        self.with_active_slice_on(ticket, &format!("feature/20261101-{ticket}-{title}"), timer_running)
+    }
+
+    /// Like `with_active_slice`, on `branch` in `REPO`.
+    pub fn with_active_slice_on(&self, ticket: &str, branch: &str, timer_running: bool) -> ActiveSlice {
+        self.add_entry(Some(ticket), timer_running, true);
+        let branch = branch.to_string();
         self.with_branch(&branch, T_BRANCH_OLD_HEAD, true);
         let id = SliceId(format!("{ticket}-1"));
         let repo = SliceRepo {
