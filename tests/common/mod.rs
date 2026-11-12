@@ -18,6 +18,12 @@ pub const MONDAY: &str = "TBOARD-3";
 pub const UNKNOWN: &str = "ENG-404";
 pub const BASE_COMMIT: &str = "abc1234";
 pub const REPO: &str = "/work/app";
+/// Repositories other than `REPO`, for slices that span several (SLICE-10),
+/// and the commit each one's HEAD is at.
+pub const API: &str = "/work/api";
+pub const API_HEAD: &str = "0api000";
+pub const WEB: &str = "/work/web";
+pub const WEB_HEAD: &str = "0web000";
 pub const TODAY: &str = "20261102";
 
 /// T's branch as a new feature opened today, and as an earlier slice left it.
@@ -57,7 +63,28 @@ pub fn system_of(r: &TicketRef) -> TicketSystemKind {
 
 /// Where the default worktree for a branch lives: `<repo>/../app.slices/<dir>`.
 pub fn worktree_for(branch: &str) -> PathBuf {
-    PathBuf::from("/work/app.slices").join(branch.replace('/', "-"))
+    worktree_in(REPO, branch)
+}
+
+/// Where the default worktree for a branch lives in any repository:
+/// `<repo>/../<repo name>.slices/<dir>`.
+pub fn worktree_in(repo: &str, branch: &str) -> PathBuf {
+    let repo = Path::new(repo);
+    let name = repo.file_name().unwrap().to_string_lossy();
+    repo.parent()
+        .unwrap()
+        .join(format!("{name}.slices"))
+        .join(branch.replace('/', "-"))
+}
+
+/// A repository other than `REPO`: its HEAD, branches and worktrees.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Repo {
+    pub head: String,
+    /// Branch name to head commit.
+    pub branches: BTreeMap<String, String>,
+    /// Branch name to worktree path.
+    pub worktrees: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,10 +104,14 @@ pub struct Entry {
 pub struct World {
     pub entries: BTreeMap<i64, Entry>,
     pub tickets: BTreeMap<String, Ticket>,
-    /// Branch name to head commit.
+    /// `REPO`'s branches: branch name to head commit. Its HEAD is at
+    /// `BASE_COMMIT`.
     pub branches: BTreeMap<String, String>,
-    /// Branch name to worktree path.
+    /// `REPO`'s worktrees: branch name to worktree path.
     pub worktrees: BTreeMap<String, PathBuf>,
+    /// Every other repository, by path. Git fails on a path that is neither
+    /// `REPO` nor one of these.
+    pub repos: BTreeMap<PathBuf, Repo>,
     pub active: Option<ActiveSlice>,
     pub manifests: BTreeMap<SliceId, Manifest>,
     pub slice_counts: BTreeMap<String, u32>,
@@ -198,6 +229,55 @@ impl Fake {
         }
     }
 
+    /// A repository other than `REPO`, with HEAD and `main` at `head` and no
+    /// other branch.
+    pub fn with_repo(&self, repo: &str, head: &str) {
+        let mut r = Repo {
+            head: head.to_string(),
+            ..Repo::default()
+        };
+        r.branches.insert("main".into(), head.to_string());
+        self.world.borrow_mut().repos.insert(PathBuf::from(repo), r);
+    }
+
+    /// A branch in `repo`, which is `REPO` or one made by `with_repo`,
+    /// optionally checked out in its worktree.
+    pub fn with_branch_in(&self, repo: &str, name: &str, head: &str, with_worktree: bool) {
+        if repo == REPO {
+            return self.with_branch(name, head, with_worktree);
+        }
+        let mut w = self.world.borrow_mut();
+        let r = w.repos.get_mut(Path::new(repo)).expect("with_branch_in: no such repo");
+        r.branches.insert(name.to_string(), head.to_string());
+        if with_worktree {
+            r.worktrees.insert(name.to_string(), worktree_in(repo, name));
+        }
+    }
+
+    /// Add `repo`, made by `with_repo`, to the active slice as an earlier add
+    /// would have left it: on the slice's branch, checked out in its
+    /// worktree, based on the repository's HEAD.
+    pub fn with_slice_repo(&self, repo: &str) -> SliceRepo {
+        let (branch, head) = {
+            let w = self.world.borrow();
+            let slice = w.active.as_ref().expect("with_slice_repo: no active slice");
+            (slice.repos[0].branch.clone(), w.repos[Path::new(repo)].head.clone())
+        };
+        self.with_branch_in(repo, &branch, &head, true);
+        let added = SliceRepo {
+            repo: PathBuf::from(repo),
+            branch: branch.clone(),
+            worktree: worktree_in(repo, &branch),
+            base_commit: head,
+        };
+        let mut w = self.world.borrow_mut();
+        let slice = w.active.as_mut().unwrap();
+        slice.repos.push(added.clone());
+        let id = slice.id.clone();
+        w.manifests.get_mut(&id).unwrap().repos.push(added.clone());
+        added
+    }
+
     /// Record an active slice for `ticket` as an earlier open would have left
     /// it, on its branch from yesterday, with an entry for the ticket today
     /// that is running or stopped.
@@ -207,12 +287,16 @@ impl Fake {
         let branch = format!("feature/20261101-{ticket}-{title}");
         self.with_branch(&branch, T_BRANCH_OLD_HEAD, true);
         let id = SliceId(format!("{ticket}-1"));
-        let slice = ActiveSlice {
-            id: id.clone(),
-            ticket: tref(ticket),
+        let repo = SliceRepo {
             repo: PathBuf::from(REPO),
             branch: branch.clone(),
             worktree: worktree_for(&branch),
+            base_commit: T_BRANCH_OLD_HEAD.to_string(),
+        };
+        let slice = ActiveSlice {
+            id: id.clone(),
+            ticket: tref(ticket),
+            repos: vec![repo.clone()],
         };
         let mut w = self.world.borrow_mut();
         w.manifests.insert(
@@ -221,8 +305,7 @@ impl Fake {
                 id,
                 ticket: tref(ticket),
                 ticket_system: system_of(&tref(ticket)),
-                branch,
-                base_commit: T_BRANCH_OLD_HEAD.to_string(),
+                repos: vec![repo],
                 status: ManifestStatus::Open,
                 acceptance_criteria: vec![],
                 invariants: vec![],
@@ -371,66 +454,105 @@ impl TicketSystem for Fake {
     }
 }
 
-impl Vcs for Fake {
-    fn resolve(&self, _repo: &Path, rev: &str) -> PortResult<String> {
-        self.read(Source::Git)?;
-        let w = self.world.borrow();
-        match rev {
-            "HEAD" => Ok(BASE_COMMIT.to_string()),
-            r => w.branches.get(r).cloned().ok_or(PortError {
+impl Fake {
+    /// Run `f` on `repo`'s HEAD, branches and worktrees, or fail as git does
+    /// outside a repository.
+    fn in_repo<R>(
+        &self,
+        repo: &Path,
+        f: impl FnOnce(&str, &mut BTreeMap<String, String>, &mut BTreeMap<String, PathBuf>) -> R,
+    ) -> PortResult<R> {
+        let mut w = self.world.borrow_mut();
+        let w = &mut *w;
+        if repo == Path::new(REPO) {
+            return Ok(f(BASE_COMMIT, &mut w.branches, &mut w.worktrees));
+        }
+        match w.repos.get_mut(repo) {
+            Some(r) => Ok(f(&r.head, &mut r.branches, &mut r.worktrees)),
+            None => Err(PortError {
                 source: Source::Git,
-                message: format!("no {r}"),
+                message: format!("{} is not a git repository", repo.display()),
             }),
         }
     }
 
-    fn branches(&self, _repo: &Path) -> PortResult<Vec<String>> {
+    /// Every worktree path, in every repository.
+    fn worktree_paths(&self) -> Vec<PathBuf> {
+        let w = self.world.borrow();
+        w.worktrees
+            .values()
+            .chain(w.repos.values().flat_map(|r| r.worktrees.values()))
+            .cloned()
+            .collect()
+    }
+}
+
+impl Vcs for Fake {
+    fn resolve(&self, repo: &Path, rev: &str) -> PortResult<String> {
         self.read(Source::Git)?;
-        Ok(self.world.borrow().branches.keys().cloned().collect())
+        self.in_repo(repo, |head, branches, _| match rev {
+            "HEAD" => Ok(head.to_string()),
+            r => branches.get(r).cloned().ok_or(PortError {
+                source: Source::Git,
+                message: format!("no {r}"),
+            }),
+        })?
     }
 
-    fn worktree_of(&self, _repo: &Path, branch: &str) -> PortResult<Option<PathBuf>> {
+    fn branches(&self, repo: &Path) -> PortResult<Vec<String>> {
         self.read(Source::Git)?;
-        Ok(self.world.borrow().worktrees.get(branch).cloned())
+        self.in_repo(repo, |_, branches, _| branches.keys().cloned().collect())
     }
 
-    fn create_branch(&self, _repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()> {
+    fn worktree_of(&self, repo: &Path, branch: &str) -> PortResult<Option<PathBuf>> {
+        self.read(Source::Git)?;
+        self.in_repo(repo, |_, _, worktrees| worktrees.get(branch).cloned())
+    }
+
+    fn create_branch(&self, repo: &Path, branch: &str, path: &Path, base: &str) -> PortResult<()> {
+        self.in_repo(repo, |_, _, _| ())?;
         self.write(
             "create_branch",
             format!("{branch} {} {base}", path.display()),
             Source::Git,
         )?;
-        let mut w = self.world.borrow_mut();
-        assert!(!w.branches.contains_key(branch), "create_branch: {branch} exists");
-        w.branches.insert(branch.to_string(), base.to_string());
-        w.worktrees.insert(branch.to_string(), path.to_path_buf());
-        Ok(())
+        let taken = self.worktree_paths().contains(&path.to_path_buf());
+        assert!(!taken, "create_branch: a worktree is already at {}", path.display());
+        self.in_repo(repo, |_, branches, worktrees| {
+            assert!(!branches.contains_key(branch), "create_branch: {branch} exists");
+            branches.insert(branch.to_string(), base.to_string());
+            worktrees.insert(branch.to_string(), path.to_path_buf());
+        })
     }
 
-    fn add_worktree(&self, _repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+    fn add_worktree(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+        self.in_repo(repo, |_, _, _| ())?;
         self.write("add_worktree", format!("{branch} {}", path.display()), Source::Git)?;
-        let mut w = self.world.borrow_mut();
-        assert!(w.branches.contains_key(branch), "add_worktree: no branch {branch}");
-        assert!(
-            !w.worktrees.contains_key(branch),
-            "add_worktree: {branch} already checked out"
-        );
-        w.worktrees.insert(branch.to_string(), path.to_path_buf());
-        Ok(())
+        let taken = self.worktree_paths().contains(&path.to_path_buf());
+        assert!(!taken, "add_worktree: a worktree is already at {}", path.display());
+        self.in_repo(repo, |_, branches, worktrees| {
+            assert!(branches.contains_key(branch), "add_worktree: no branch {branch}");
+            assert!(
+                !worktrees.contains_key(branch),
+                "add_worktree: {branch} already checked out"
+            );
+            worktrees.insert(branch.to_string(), path.to_path_buf());
+        })
     }
 
-    fn remove_worktree(&self, _repo: &Path, path: &Path) -> PortResult<()> {
+    fn remove_worktree(&self, repo: &Path, path: &Path) -> PortResult<()> {
+        self.in_repo(repo, |_, _, _| ())?;
         self.write("remove_worktree", path.display().to_string(), Source::Git)?;
-        self.world.borrow_mut().worktrees.retain(|_, p| p != path);
-        Ok(())
+        self.in_repo(repo, |_, _, worktrees| worktrees.retain(|_, p| p != path))
     }
 
-    fn remove_branch(&self, _repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+    fn remove_branch(&self, repo: &Path, branch: &str, path: &Path) -> PortResult<()> {
+        self.in_repo(repo, |_, _, _| ())?;
         self.write("remove_branch", format!("{branch} {}", path.display()), Source::Git)?;
-        let mut w = self.world.borrow_mut();
-        w.worktrees.remove(branch);
-        w.branches.remove(branch);
-        Ok(())
+        self.in_repo(repo, |_, branches, worktrees| {
+            worktrees.remove(branch);
+            branches.remove(branch);
+        })
     }
 }
 

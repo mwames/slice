@@ -44,9 +44,12 @@ fn home(name: &str) -> TempDir {
     let slice = ActiveSlice {
         id: SliceId("ENG-1-1".into()),
         ticket: TicketRef("ENG-1".into()),
-        repo: PathBuf::from("/work/app"),
-        branch: branch.into(),
-        worktree: PathBuf::from("/work/app.slices/feature-20261101-ENG-1-login"),
+        repos: vec![SliceRepo {
+            repo: PathBuf::from("/work/app"),
+            branch: branch.into(),
+            worktree: PathBuf::from("/work/app.slices/feature-20261101-ENG-1-login"),
+            base_commit: "def5678".into(),
+        }],
     };
     state.set_active(&slice).unwrap();
     state
@@ -54,8 +57,7 @@ fn home(name: &str) -> TempDir {
             id: slice.id.clone(),
             ticket: slice.ticket.clone(),
             ticket_system: TicketSystemKind::ClickUp,
-            branch: branch.into(),
-            base_commit: "def5678".into(),
+            repos: slice.repos.clone(),
             status: ManifestStatus::Open,
             acceptance_criteria: vec![],
             invariants: vec![],

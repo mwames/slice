@@ -488,7 +488,7 @@ fn reopen_after_abandon() {
 
     let request = OpenRequest {
         ticket: tref(T),
-        repo: first.repo.clone(),
+        repo: first.repos[0].repo.clone(),
         branch_type: None,
         base: None,
     };
@@ -497,8 +497,12 @@ fn reopen_after_abandon() {
     };
 
     assert_eq!(second.id, SliceId(format!("{T}-2")), "the next slice id");
-    assert_eq!(second.branch, first.branch, "the ticket's branch");
-    assert_eq!(second.worktree, first.worktree, "the ticket's worktree");
+    assert_eq!(second.repos.len(), 1, "the repository it was opened in");
+    assert_eq!(second.repos[0].branch, first.repos[0].branch, "the ticket's branch");
+    assert_eq!(
+        second.repos[0].worktree, first.repos[0].worktree,
+        "the ticket's worktree"
+    );
     let after = fake.snapshot();
     assert_eq!(after.active, Some(second.clone()));
     assert_eq!(

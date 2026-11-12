@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use slice::adapters::git::Git;
-use slice::adapters::state::{FileState, manifest_yaml};
+use slice::adapters::state::{FileState, manifest_yaml, parse_manifest_yaml};
 use slice::config::Config;
 use slice::ports::*;
 
@@ -80,8 +80,12 @@ fn manifest() -> Manifest {
         id: SliceId("ENG-1-1".into()),
         ticket: TicketRef("ENG-1".into()),
         ticket_system: TicketSystemKind::ClickUp,
-        branch: "feature/20261102-ENG-1-login".into(),
-        base_commit: "abc1234".into(),
+        repos: vec![SliceRepo {
+            repo: PathBuf::from("/work/app"),
+            branch: BRANCH.into(),
+            worktree: PathBuf::from("/work/app.slices/feature-20261102-ENG-1-login"),
+            base_commit: "abc1234".into(),
+        }],
         status: ManifestStatus::Open,
         acceptance_criteria: vec![],
         invariants: vec![],
@@ -225,9 +229,12 @@ fn state_round_trips_the_active_slice_and_counts_slices() {
     let slice = ActiveSlice {
         id: SliceId("ENG-1-1".into()),
         ticket: ticket.clone(),
-        repo: PathBuf::from("/work/app"),
-        branch: BRANCH.into(),
-        worktree: PathBuf::from("/work/app.slices/x"),
+        repos: vec![SliceRepo {
+            repo: PathBuf::from("/work/app"),
+            branch: BRANCH.into(),
+            worktree: PathBuf::from("/work/app.slices/x"),
+            base_commit: "abc1234".into(),
+        }],
     };
     state.set_active(&slice).unwrap();
     assert_eq!(state.active().unwrap(), Some(slice));
@@ -253,6 +260,7 @@ fn state_reports_a_corrupt_file_as_local_state() {
     assert_eq!(err.source, Source::LocalState);
 }
 
+// SLICE-10-9
 #[test]
 fn manifests_kept_in_state_by_slice_id() {
     let dir = temp_dir("manifest");
@@ -265,8 +273,6 @@ fn manifests_kept_in_state_by_slice_id() {
     let text = std::fs::read_to_string(&path).unwrap();
     assert_eq!(text, manifest_yaml(&manifest()));
     assert!(text.contains("ticket: \"ENG-1\"\n"));
-    assert!(text.contains("branch: \"feature/20261102-ENG-1-login\"\n"));
-    assert!(text.contains("base_commit: \"abc1234\"\n"));
     assert_eq!(state.read_manifest(&id).unwrap(), Some(manifest()));
 
     let closed = Manifest {
@@ -349,6 +355,7 @@ budgets:
 ";
 
 // SLICE-7-5
+// SLICE-10-9
 #[test]
 fn older_manifest_reads_back_without_a_reason() {
     let dir = temp_dir("older-manifest");
@@ -368,6 +375,7 @@ fn older_manifest_reads_back_without_a_reason() {
             spec_hash: Some("s123".into()),
             budgets: vec![("tokens".into(), "100k".into())],
             abandon_reason: None,
+            repos: vec![earlier_repo()],
             ..manifest()
         })
     );
@@ -398,5 +406,199 @@ fn abandon_reason_round_trips_through_the_manifest() {
 
         assert_eq!(read.abandon_reason.as_deref(), Some(reason), "{reason:?}");
         assert_eq!(read, abandoned, "{reason:?}: every field as written");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Several repositories in a slice
+// ---------------------------------------------------------------------------
+
+/// The one repository a manifest written before SLICE-10 reads as: its
+/// branch and base commit, with no repository path or worktree, which that
+/// manifest never recorded.
+fn earlier_repo() -> SliceRepo {
+    SliceRepo {
+        repo: PathBuf::new(),
+        branch: BRANCH.into(),
+        worktree: PathBuf::new(),
+        base_commit: "abc1234".into(),
+    }
+}
+
+/// A manifest as slice wrote it after SLICE-7 and before SLICE-10: one
+/// repository's branch and base commit at the top level, and a reason.
+const EARLIER_MANIFEST: &str = "id: \"ENG-1-3\"
+ticket: \"ENG-1\"
+ticket_system: clickup
+branch: \"feature/20261102-ENG-1-login\"
+base_commit: \"abc1234\"
+status: abandoned
+acceptance_criteria: []
+invariants: []
+spec_hash: null
+test_hash: null
+abandon_reason: \"fixed by: ENG-14800\"
+budgets: {}
+";
+
+/// Repositories whose paths, branches and worktrees need quoting.
+fn awkward_repos() -> Vec<SliceRepo> {
+    vec![
+        SliceRepo {
+            repo: PathBuf::from("/work/app"),
+            branch: BRANCH.into(),
+            worktree: PathBuf::from("/work/app.slices/feature-20261102-ENG-1-login"),
+            base_commit: "abc1234".into(),
+        },
+        SliceRepo {
+            repo: PathBuf::from("/home/me/my repos/api: \"v2\""),
+            branch: "bug/20261020-ENG-1-crash".into(),
+            worktree: PathBuf::from("/home/me/my repos/api: \"v2\".slices/bug-20261020-ENG-1-crash"),
+            base_commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        },
+        SliceRepo {
+            repo: PathBuf::from("/srv/café/web"),
+            branch: BRANCH.into(),
+            worktree: PathBuf::from("/srv/café/web.slices/feature-20261102-ENG-1-login"),
+            base_commit: "def5678".into(),
+        },
+    ]
+}
+
+// SLICE-10-9
+#[test]
+fn manifest_round_trips_every_repository() {
+    let dir = temp_dir("manifest-repos");
+    let state = FileState::new(dir.join("state"));
+    let all = awkward_repos();
+    for n in 1..=all.len() {
+        for (status, reason) in [
+            (ManifestStatus::Open, None),
+            (ManifestStatus::Closed, None),
+            (
+                ManifestStatus::Abandoned,
+                Some("said \"no\": status: closed\nbudgets: {}".to_string()),
+            ),
+        ] {
+            let m = Manifest {
+                repos: all[..n].to_vec(),
+                status,
+                abandon_reason: reason,
+                acceptance_criteria: vec!["ENG-1-1".into()],
+                budgets: vec![("tokens".into(), "100k".into())],
+                ..manifest()
+            };
+
+            assert_eq!(
+                parse_manifest_yaml(&manifest_yaml(&m)),
+                Ok(m.clone()),
+                "{n} repositories"
+            );
+            state.write_manifest(&m).unwrap();
+            assert_eq!(state.read_manifest(&m.id).unwrap(), Some(m), "{n} repositories");
+        }
+    }
+}
+
+// SLICE-10-9
+#[test]
+fn active_slice_round_trips_every_repository() {
+    let dir = temp_dir("active-repos");
+    let state = FileState::new(dir.join("state"));
+    let all = awkward_repos();
+    for n in 1..=all.len() {
+        let slice = ActiveSlice {
+            id: SliceId("ENG-1-1".into()),
+            ticket: TicketRef("ENG-1".into()),
+            repos: all[..n].to_vec(),
+        };
+
+        state.set_active(&slice).unwrap();
+
+        assert_eq!(state.active().unwrap(), Some(slice), "{n} repositories");
+    }
+    assert_eq!(
+        state.next_slice_id(&TicketRef("ENG-1".into())).unwrap(),
+        SliceId("ENG-1-2".into()),
+        "adding repositories does not count as another slice"
+    );
+}
+
+// SLICE-10-9
+#[test]
+fn earlier_manifests_read_as_one_repository() {
+    let want = Manifest {
+        id: SliceId("ENG-1-3".into()),
+        status: ManifestStatus::Abandoned,
+        abandon_reason: Some("fixed by: ENG-14800".into()),
+        repos: vec![earlier_repo()],
+        ..manifest()
+    };
+    assert_eq!(parse_manifest_yaml(EARLIER_MANIFEST), Ok(want.clone()));
+
+    let dir = temp_dir("earlier-manifest");
+    let state = FileState::new(dir.join("state"));
+    std::fs::create_dir_all(dir.join("state/manifests")).unwrap();
+    std::fs::write(dir.join("state/manifests/ENG-1-3.yaml"), EARLIER_MANIFEST).unwrap();
+    std::fs::write(dir.join("state/manifests/ENG-1-2.yaml"), OLDER_MANIFEST).unwrap();
+
+    assert_eq!(state.read_manifest(&want.id).unwrap(), Some(want));
+    let older = state
+        .read_manifest(&SliceId("ENG-1-2".into()))
+        .unwrap()
+        .expect("manifest");
+    assert_eq!(older.repos, [earlier_repo()]);
+}
+
+/// A worktree of `repo` for a new branch, at `<root>/elsewhere/wt`, outside
+/// the repository and its `.slices` directory.
+fn worktree_of_repo(repo: &Path) -> PathBuf {
+    let worktree = repo.parent().unwrap().join("elsewhere/wt");
+    git(
+        repo,
+        &["worktree", "add", "-q", "-b", "scratch", &worktree.to_string_lossy()],
+    );
+    worktree
+}
+
+// SLICE-10-7
+#[test]
+fn git_repository_from_the_main_working_tree() {
+    let repo = repo("repository-main");
+    let sub = repo.join("src/deep");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    for dir in [repo.to_path_buf(), sub] {
+        let found = Git::repository(&dir).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            repo.canonicalize().unwrap(),
+            "from {}",
+            dir.display()
+        );
+    }
+}
+
+// SLICE-10-7
+#[test]
+fn git_repository_from_a_worktree() {
+    let repo = repo("repository-worktree");
+    let worktree = worktree_of_repo(&repo);
+    let sub = worktree.join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    let slices = repo.parent().unwrap().join("app.slices/x");
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", BRANCH, &slices.to_string_lossy()],
+    );
+
+    for dir in [worktree, sub, slices] {
+        let found = Git::repository(&dir).unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            repo.canonicalize().unwrap(),
+            "from {}",
+            dir.display()
+        );
     }
 }
