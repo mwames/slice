@@ -34,6 +34,13 @@ impl Git {
     pub fn toplevel(dir: &Path) -> PortResult<PathBuf> {
         git(dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
     }
+
+    /// The main working tree of the repository containing `dir`, which may
+    /// be inside one of its worktrees (SLICE-10-7).
+    pub fn repository(dir: &Path) -> PortResult<PathBuf> {
+        let _ = dir;
+        todo!("SLICE-10-7")
+    }
 }
 
 impl Vcs for Git {

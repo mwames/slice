@@ -142,14 +142,24 @@ impl fmt::Display for BranchName {
     }
 }
 
+/// One repository of a slice (SLICE-10). `repo` is the repository's main
+/// working tree, never one of its worktrees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SliceRepo {
+    pub repo: PathBuf,
+    pub branch: String,
+    pub worktree: PathBuf,
+    pub base_commit: String,
+}
+
 /// The active slice, as recorded in local state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveSlice {
     pub id: SliceId,
     pub ticket: TicketRef,
-    pub repo: PathBuf,
-    pub branch: String,
-    pub worktree: PathBuf,
+    /// In the order they were added; the first is the one the slice was
+    /// opened in, whose branch name every later repository takes.
+    pub repos: Vec<SliceRepo>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,14 +171,14 @@ pub enum ManifestStatus {
 }
 
 /// The slice manifest, kept in local state by slice id. Everything after
-/// `base_commit` is filled in by later pipeline stages; open leaves it empty.
+/// `repos` is filled in by later pipeline stages; open leaves it empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub id: SliceId,
     pub ticket: TicketRef,
     pub ticket_system: TicketSystemKind,
-    pub branch: String,
-    pub base_commit: String,
+    /// The same repositories, in the same order, as the active slice.
+    pub repos: Vec<SliceRepo>,
     pub status: ManifestStatus,
     pub acceptance_criteria: Vec<String>,
     pub invariants: Vec<String>,
@@ -460,6 +470,9 @@ pub enum OpenOutcome {
     /// The slice for this ticket was open but paused; its timer is running
     /// again (SLICE-2-7).
     Resumed(ActiveSlice),
+    /// The request's repository was added to the active slice, and is the
+    /// last of its `repos` (SLICE-10-1, 10-3, 10-4).
+    Added(ActiveSlice),
 }
 
 /// Open a slice for the requested ticket: stop any stray timer, run the
@@ -562,12 +575,17 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
             }
         }
 
+        let repo = SliceRepo {
+            repo: request.repo.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+            base_commit: base_commit.clone(),
+        };
         let manifest = Manifest {
             id: id.clone(),
             ticket: ticket.reference.clone(),
             ticket_system: ticket.system,
-            branch: branch.clone(),
-            base_commit: base_commit.clone(),
+            repos: vec![repo.clone()],
             status: ManifestStatus::Open,
             acceptance_criteria: Vec::new(),
             invariants: Vec::new(),
@@ -584,9 +602,7 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
         let slice = ActiveSlice {
             id: id.clone(),
             ticket: ticket.reference.clone(),
-            repo: request.repo.clone(),
-            branch: branch.clone(),
-            worktree: worktree.clone(),
+            repos: vec![repo],
         };
         deps.state.set_active(&slice).map_err(|e| (Step::SetActive, e))?;
         Ok(slice)
@@ -624,10 +640,27 @@ fn reopen(
     if slice.ticket != request.ticket {
         return Err(SliceError::AnotherSliceActive(Box::new(slice.clone())));
     }
+    if !slice.repos.iter().any(|r| r.repo == request.repo) {
+        return add_repo(deps, request, slice, report);
+    }
     match resume_active(deps, slice, report)? {
         ResumeOutcome::Resumed(slice) => Ok(OpenOutcome::Resumed(slice)),
         ResumeOutcome::AlreadyRunning(slice) => Ok(OpenOutcome::AlreadyOpen(slice)),
     }
+}
+
+/// Add the request's repository to the active slice for the same ticket:
+/// use or create its branch, named as the first repository's, and worktree,
+/// run the ticket's entry for today if it is stopped, and record the
+/// repository in the manifest and the active slice (SLICE-10).
+fn add_repo(
+    deps: &Deps,
+    request: &OpenRequest,
+    slice: &ActiveSlice,
+    report: &StatusReport,
+) -> Result<OpenOutcome, SliceError> {
+    let _ = (deps, request, slice, report);
+    todo!("SLICE-10-1")
 }
 
 /// Run the ticket's entry for today: restart it if there is one, start one
@@ -792,8 +825,10 @@ impl Abandoned {
     /// The line printed without --json.
     pub fn message(&self) -> String {
         let line = format!(
-            "abandoned {}; {} left as it was; branch {} kept",
-            self.slice.id.0, self.slice.ticket.0, self.slice.branch
+            "abandoned {}; {} left as it was; {} kept",
+            self.slice.id.0,
+            self.slice.ticket.0,
+            kept_branches(&self.slice)
         );
         match &self.reason {
             Some(reason) => format!("{line}; reason: {reason}"),
@@ -819,12 +854,18 @@ pub fn abandon_reason(raw: &str) -> Result<String, String> {
     Ok(reason.to_string())
 }
 
-/// A slice as `--json` output reports it.
+/// A slice as `--json` output reports it: id, ticket, and each repository
+/// with its path, branch and worktree, in the order they were added
+/// (SLICE-10-8).
 pub fn slice_json(s: &ActiveSlice) -> serde_json::Value {
-    serde_json::json!({
-        "id": s.id.0, "ticket": s.ticket.0, "repo": s.repo, "branch": s.branch,
-        "worktree": s.worktree,
-    })
+    let _ = s;
+    todo!("SLICE-10-8")
+}
+
+/// The branches close and abandon leave in place, for their messages.
+pub fn kept_branches(s: &ActiveSlice) -> String {
+    let _ = s;
+    todo!("SLICE-10-8")
 }
 
 /// Stop the timer, mark the manifest abandoned with the request's reason, and
