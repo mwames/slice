@@ -22,13 +22,18 @@
 //! [agents]                            # for slice run
 //! spool = "~/bin/spool-linux-arm64"    # required by slice run
 //! env_file = "~/.config/slice/agent.env"   # the default
+//!
+//! [[repos]]                           # branch template by repository path;
+//! path = "~/repos/provision/*"         # the first match wins, and the
+//! branch = "{type}/{date}-{ticket}_{title}"  # default is
+//!                                      # {type}/{date}-{ticket}-{title}
 //! ```
 
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::ports::{Settings, Statuses};
+use crate::ports::{BranchTemplate, Settings, Statuses};
 use crate::run::AgentSettings;
 
 #[derive(Debug, Default, Deserialize)]
@@ -38,6 +43,16 @@ pub struct Config {
     pub status: StatusConfig,
     pub harvest: HarvestConfig,
     pub agents: AgentsConfig,
+    pub repos: Vec<RepoConfig>,
+}
+
+/// A `[[repos]]` entry: the branch template for repositories whose main
+/// working tree matches `path` (SLICE-11).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RepoConfig {
+    pub path: Option<String>,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -114,13 +129,20 @@ impl Config {
         toml::from_str(text)
     }
 
-    pub fn settings(&self) -> Settings {
-        Settings {
+    /// The settings, or an error naming the first `[[repos]]` entry that
+    /// has no path, no template, or an invalid one (SLICE-11-7).
+    pub fn settings(&self) -> Result<Settings, String> {
+        Ok(Settings {
             in_progress: self.status.in_progress.or("development", "In Progress"),
             review: self.status.review.or("dev complete", "Waiting for review"),
             done: self.status.done.or("complete", "Done"),
             worktree_root: self.worktree_root.as_deref().map(expand_home),
-        }
+            branch_templates: self.branch_templates()?,
+        })
+    }
+
+    fn branch_templates(&self) -> Result<Vec<(PathBuf, BranchTemplate)>, String> {
+        todo!("SLICE-11-7")
     }
 
     /// The agent settings for slice run, or an error naming what's missing:

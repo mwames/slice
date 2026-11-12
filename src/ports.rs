@@ -53,57 +53,73 @@ pub struct SliceId(pub String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BranchType(pub String);
 
-/// A ticket's branch name, `<type>/<yyyymmdd>-<REF>-<short title>`, taken
-/// apart.
+/// A ticket's branch name taken apart: the parts a [`BranchTemplate`] writes
+/// and recognizes (SLICE-11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchName {
-    pub branch_type: BranchType,
-    /// `yyyymmdd`, the day the branch was created.
-    pub date: String,
+    /// `None` when the template has no `{type}`.
+    pub branch_type: Option<BranchType>,
+    /// `yyyymmdd`, the day the branch was created. `None` unless the
+    /// template gives a full date: `{date}`, or `{yyyy}`, `{mm}` and `{dd}`.
+    pub date: Option<String>,
     pub ticket: TicketRef,
     pub short_title: String,
 }
 
 impl BranchName {
-    /// Name the branch for a new slice of `ticket` created on `date`.
-    pub fn new(branch_type: &BranchType, date: &str, ticket: &Ticket) -> BranchName {
+    /// The parts for a new branch of `ticket` created on `date`.
+    pub fn new(branch_type: Option<&BranchType>, date: &str, ticket: &Ticket) -> BranchName {
         BranchName {
-            branch_type: branch_type.clone(),
-            date: date.to_string(),
+            branch_type: branch_type.cloned(),
+            date: Some(date.to_string()),
             ticket: ticket.reference.clone(),
             short_title: short_title(&ticket.title),
         }
     }
+}
 
-    /// Parse a branch name; `None` unless it has the ticket-branch shape.
-    pub fn parse(name: &str) -> Option<BranchName> {
-        let (branch_type, rest) = name.split_once('/')?;
-        if branch_type.is_empty() || !branch_type.bytes().all(|b| b.is_ascii_lowercase()) || rest.contains('/') {
-            return None;
-        }
-        let (date, rest) = rest.split_at_checked(8)?;
-        let rest = rest.strip_prefix('-')?;
-        if !date.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        // <PREFIX>-<digits>, then optionally -<short title>.
-        let (prefix, rest) = rest.split_once('-')?;
-        let mut chars = prefix.bytes();
-        if !chars.next().is_some_and(|b| b.is_ascii_uppercase())
-            || !chars.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        {
-            return None;
-        }
-        let (number, short_title) = rest.split_once('-').unwrap_or((rest, ""));
-        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        Some(BranchName {
-            branch_type: BranchType(branch_type.to_string()),
-            date: date.to_string(),
-            ticket: TicketRef(format!("{prefix}-{number}")),
-            short_title: short_title.to_string(),
-        })
+/// A branch name template: literal text with the placeholders `{type}`,
+/// `{date}`, `{yyyy}`, `{mm}`, `{dd}`, `{ticket}` and `{title}` (SLICE-11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchTemplate {
+    text: String,
+}
+
+impl BranchTemplate {
+    /// The template for a repository no config entry matches (SLICE-11-1).
+    pub const DEFAULT: &str = "{type}/{date}-{ticket}-{title}";
+
+    /// Check a template, or say what is wrong with it (SLICE-11-7).
+    pub fn parse(text: &str) -> Result<BranchTemplate, String> {
+        let _ = text;
+        todo!("SLICE-11-7")
+    }
+
+    /// Whether names from this template carry a type (SLICE-11-6).
+    pub fn has_type(&self) -> bool {
+        todo!("SLICE-11-6")
+    }
+
+    /// The branch name for `name`'s parts. `name` has a type when the
+    /// template has `{type}`, and a date when it has any date placeholder.
+    /// An empty short title drops `{title}` and the literal text directly
+    /// before it (SLICE-11-8).
+    pub fn render(&self, name: &BranchName) -> String {
+        let _ = name;
+        todo!("SLICE-11-2")
+    }
+
+    /// `branch`'s parts when the whole name matches the template
+    /// (SLICE-11-3, 11-4).
+    pub fn recognize(&self, branch: &str) -> Option<BranchName> {
+        let _ = branch;
+        todo!("SLICE-11-3")
+    }
+}
+
+impl Default for BranchTemplate {
+    fn default() -> BranchTemplate {
+        BranchTemplate::parse(BranchTemplate::DEFAULT).expect("the default template is valid")
     }
 }
 
@@ -130,16 +146,6 @@ fn short_title(title: &str) -> String {
         out.push_str(word);
     }
     out
-}
-
-impl fmt::Display for BranchName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}-{}", self.branch_type.0, self.date, self.ticket.0)?;
-        if !self.short_title.is_empty() {
-            write!(f, "-{}", self.short_title)?;
-        }
-        Ok(())
-    }
 }
 
 /// One repository of a slice (SLICE-10). `repo` is the repository's main
@@ -216,6 +222,19 @@ pub struct Settings {
     pub done: Statuses,
     /// Directory for worktrees; `None` means `<repo>/../<repo>.slices/`.
     pub worktree_root: Option<PathBuf>,
+    /// Branch templates by repository path pattern, in config order, with
+    /// `~` already expanded (SLICE-11-5).
+    pub branch_templates: Vec<(PathBuf, BranchTemplate)>,
+}
+
+impl Settings {
+    /// The template of the first entry whose pattern matches `repo`, a
+    /// main working tree, as a whole path; `*` matches within one path
+    /// segment. The default when none does (SLICE-11-1, 11-5).
+    pub fn template_for(&self, repo: &Path) -> BranchTemplate {
+        let _ = repo;
+        todo!("SLICE-11-5")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,10 +516,11 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
     let (branch, worktree, base_commit, checkout) = match existing {
         Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
         None => {
+            let template = deps.settings.template_for(&request.repo);
             let Some(branch_type) = &request.branch_type else {
                 return Err(SliceError::TypeRequired);
             };
-            let branch = BranchName::new(branch_type, deps.today, &ticket).to_string();
+            let branch = template.render(&BranchName::new(Some(branch_type), deps.today, &ticket));
             plan_new(deps, request, branch, &worktree_root)?
         }
     };
@@ -582,12 +602,13 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
 /// The one branch in `repo` for the ticket, if any; more than one is
 /// refused (SLICE-2-12).
 fn existing_branch(deps: &Deps, repo: &Path, ticket: &TicketRef) -> Result<Option<String>, SliceError> {
+    let template = deps.settings.template_for(repo);
     let mut existing: Vec<String> = deps
         .vcs
         .branches(repo)
         .map_err(|e| failed(Step::Preflight, e))?
         .into_iter()
-        .filter(|b| BranchName::parse(b).is_some_and(|n| n.ticket == *ticket))
+        .filter(|b| template.recognize(b).is_some_and(|n| n.ticket == *ticket))
         .collect();
     if existing.len() > 1 {
         existing.sort();
@@ -603,8 +624,12 @@ type Plan = (String, PathBuf, String, Checkout);
 /// --base or a --type other than its own (SLICE-2-10).
 fn plan_existing(deps: &Deps, request: &OpenRequest, branch: String, worktree_root: &Path) -> Result<Plan, SliceError> {
     let preflight = |e| failed(Step::Preflight, e);
-    let parsed = BranchName::parse(&branch).expect("filtered on parse");
-    let type_differs = request.branch_type.as_ref().is_some_and(|t| *t != parsed.branch_type);
+    let template = deps.settings.template_for(&request.repo);
+    let parsed = template.recognize(&branch).expect("filtered on recognize");
+    let type_differs = request
+        .branch_type
+        .as_ref()
+        .is_some_and(|t| Some(t) != parsed.branch_type.as_ref());
     if request.base.is_some() || type_differs {
         return Err(SliceError::BranchOptionsConflict { branch });
     }
@@ -710,11 +735,12 @@ fn add_repo(
         Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
         None => {
             // A new branch takes the slice's name, and so its type.
+            let first_name = deps.settings.template_for(&first.repo).recognize(&first.branch);
             let type_differs = request
                 .branch_type
                 .as_ref()
-                .zip(BranchName::parse(&first.branch))
-                .is_some_and(|(t, n)| *t != n.branch_type);
+                .zip(first_name)
+                .is_some_and(|(t, n)| Some(t) != n.branch_type.as_ref());
             if type_differs {
                 return Err(SliceError::BranchOptionsConflict {
                     branch: first.branch.clone(),

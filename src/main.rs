@@ -82,7 +82,7 @@ fn run(args: &[String]) -> Result<u8, String> {
     }
 
     let config = Config::load()?;
-    let settings = config.settings();
+    let settings = config.settings()?;
     let harvest = Harvest::new(&config.harvest.project, &config.harvest.task);
     let tickets = Tickets::new();
     let state = FileState::new(FileState::default_dir());
