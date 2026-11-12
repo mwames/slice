@@ -1093,8 +1093,9 @@ requirements:
           of the same run succeeded,
           when slice open is run with T in R,
           then the earlier steps are undone in reverse order, removing a
-          branch or worktree only if this run created it and stopping an
-          entry only if this run restarted or started it, the manifest and
+          branch or worktree only if this run created it, deleting an entry
+          only if this run created it, and stopping an existing entry only
+          if this run restarted it, the manifest and
           the active slice list the repositories they listed before, it
           reports which step failed, and it exits non-zero.
 
