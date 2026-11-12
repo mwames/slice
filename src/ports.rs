@@ -492,44 +492,16 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
         Err(e) => return Err(failed(Step::ResolveTicket, e)),
     };
 
-    let mut existing: Vec<String> = deps
-        .vcs
-        .branches(&request.repo)
-        .map_err(preflight)?
-        .into_iter()
-        .filter(|b| BranchName::parse(b).is_some_and(|n| n.ticket == ticket.reference))
-        .collect();
-    if existing.len() > 1 {
-        existing.sort();
-        return Err(SliceError::AmbiguousBranch(existing));
-    }
+    let existing = existing_branch(deps, &request.repo, &ticket.reference)?;
     let worktree_root = worktree_root(deps.settings, &request.repo);
-    // (branch, worktree, base commit, how to make the worktree)
-    let (branch, worktree, base_commit, checkout) = match existing.pop() {
-        Some(branch) => {
-            let parsed = BranchName::parse(&branch).expect("filtered on parse");
-            let type_differs = request.branch_type.as_ref().is_some_and(|t| *t != parsed.branch_type);
-            if request.base.is_some() || type_differs {
-                return Err(SliceError::BranchOptionsConflict { branch });
-            }
-            let base_commit = deps.vcs.resolve(&request.repo, &branch).map_err(preflight)?;
-            match deps.vcs.worktree_of(&request.repo, &branch).map_err(preflight)? {
-                Some(path) => (branch, path, base_commit, Checkout::Existing),
-                None => {
-                    let path = worktree_root.join(branch.replace('/', "-"));
-                    (branch, path, base_commit, Checkout::AddWorktree)
-                }
-            }
-        }
+    let (branch, worktree, base_commit, checkout) = match existing {
+        Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
         None => {
             let Some(branch_type) = &request.branch_type else {
                 return Err(SliceError::TypeRequired);
             };
             let branch = BranchName::new(branch_type, deps.today, &ticket).to_string();
-            let base = request.base.as_deref().unwrap_or("HEAD");
-            let base_commit = deps.vcs.resolve(&request.repo, base).map_err(preflight)?;
-            let path = worktree_root.join(branch.replace('/', "-"));
-            (branch, path, base_commit, Checkout::CreateBranch)
+            plan_new(deps, request, branch, &worktree_root)?
         }
     };
     let id = deps.state.next_slice_id(&ticket.reference).map_err(preflight)?;
@@ -553,27 +525,16 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
             Action::SetStatus(ticket.reference.clone(), ticket.status.clone()),
         );
 
-        match checkout {
-            Checkout::Existing => {}
-            Checkout::AddWorktree => {
-                deps.vcs
-                    .add_worktree(&request.repo, &branch, &worktree)
-                    .map_err(|e| (Step::CreateWorktree, e))?;
-                undo.push(
-                    Step::CreateWorktree,
-                    Action::RemoveWorktree(request.repo.clone(), worktree.clone()),
-                );
-            }
-            Checkout::CreateBranch => {
-                deps.vcs
-                    .create_branch(&request.repo, &branch, &worktree, &base_commit)
-                    .map_err(|e| (Step::CreateWorktree, e))?;
-                undo.push(
-                    Step::CreateWorktree,
-                    Action::RemoveBranch(request.repo.clone(), branch.clone(), worktree.clone()),
-                );
-            }
-        }
+        make_worktree(
+            deps,
+            &request.repo,
+            &branch,
+            &worktree,
+            &base_commit,
+            &checkout,
+            &mut undo,
+        )
+        .map_err(|e| (Step::CreateWorktree, e))?;
 
         let repo = SliceRepo {
             repo: request.repo.clone(),
@@ -618,6 +579,86 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
     }
 }
 
+/// The one branch in `repo` for the ticket, if any; more than one is
+/// refused (SLICE-2-12).
+fn existing_branch(deps: &Deps, repo: &Path, ticket: &TicketRef) -> Result<Option<String>, SliceError> {
+    let mut existing: Vec<String> = deps
+        .vcs
+        .branches(repo)
+        .map_err(|e| failed(Step::Preflight, e))?
+        .into_iter()
+        .filter(|b| BranchName::parse(b).is_some_and(|n| n.ticket == *ticket))
+        .collect();
+    if existing.len() > 1 {
+        existing.sort();
+        return Err(SliceError::AmbiguousBranch(existing));
+    }
+    Ok(existing.pop())
+}
+
+/// (branch, worktree, base commit, how to make the worktree)
+type Plan = (String, PathBuf, String, Checkout);
+
+/// Use `branch`, which exists in the request's repository: refused with
+/// --base or a --type other than its own (SLICE-2-10).
+fn plan_existing(deps: &Deps, request: &OpenRequest, branch: String, worktree_root: &Path) -> Result<Plan, SliceError> {
+    let preflight = |e| failed(Step::Preflight, e);
+    let parsed = BranchName::parse(&branch).expect("filtered on parse");
+    let type_differs = request.branch_type.as_ref().is_some_and(|t| *t != parsed.branch_type);
+    if request.base.is_some() || type_differs {
+        return Err(SliceError::BranchOptionsConflict { branch });
+    }
+    let base_commit = deps.vcs.resolve(&request.repo, &branch).map_err(preflight)?;
+    match deps.vcs.worktree_of(&request.repo, &branch).map_err(preflight)? {
+        Some(path) => Ok((branch, path, base_commit, Checkout::Existing)),
+        None => {
+            let path = worktree_root.join(branch.replace('/', "-"));
+            Ok((branch, path, base_commit, Checkout::AddWorktree))
+        }
+    }
+}
+
+/// Create `branch` in the request's repository, at --base or `HEAD`.
+fn plan_new(deps: &Deps, request: &OpenRequest, branch: String, worktree_root: &Path) -> Result<Plan, SliceError> {
+    let base = request.base.as_deref().unwrap_or("HEAD");
+    let base_commit = deps
+        .vcs
+        .resolve(&request.repo, base)
+        .map_err(|e| failed(Step::Preflight, e))?;
+    let path = worktree_root.join(branch.replace('/', "-"));
+    Ok((branch, path, base_commit, Checkout::CreateBranch))
+}
+
+/// Make the worktree the checkout calls for, pushing the matching undo.
+fn make_worktree(
+    deps: &Deps,
+    repo: &Path,
+    branch: &str,
+    worktree: &Path,
+    base_commit: &str,
+    checkout: &Checkout,
+    undo: &mut Undo,
+) -> PortResult<()> {
+    match checkout {
+        Checkout::Existing => {}
+        Checkout::AddWorktree => {
+            deps.vcs.add_worktree(repo, branch, worktree)?;
+            undo.push(
+                Step::CreateWorktree,
+                Action::RemoveWorktree(repo.to_path_buf(), worktree.to_path_buf()),
+            );
+        }
+        Checkout::CreateBranch => {
+            deps.vcs.create_branch(repo, branch, worktree, base_commit)?;
+            undo.push(
+                Step::CreateWorktree,
+                Action::RemoveBranch(repo.to_path_buf(), branch.to_string(), worktree.to_path_buf()),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// How open gets a worktree for the slice's branch.
 enum Checkout {
     /// The branch is already checked out in a worktree.
@@ -659,8 +700,95 @@ fn add_repo(
     slice: &ActiveSlice,
     report: &StatusReport,
 ) -> Result<OpenOutcome, SliceError> {
-    let _ = (deps, request, slice, report);
-    todo!("SLICE-10-1")
+    if report.mismatch.is_some() {
+        return Err(SliceError::Inconsistent(Box::new(report.clone())));
+    }
+    let preflight = |e| failed(Step::Preflight, e);
+    let first = &slice.repos[0];
+    let worktree_root = worktree_root(deps.settings, &request.repo);
+    let (branch, worktree, base_commit, checkout) = match existing_branch(deps, &request.repo, &slice.ticket)? {
+        Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
+        None => {
+            // A new branch takes the slice's name, and so its type.
+            let type_differs = request
+                .branch_type
+                .as_ref()
+                .zip(BranchName::parse(&first.branch))
+                .is_some_and(|(t, n)| *t != n.branch_type);
+            if type_differs {
+                return Err(SliceError::BranchOptionsConflict {
+                    branch: first.branch.clone(),
+                });
+            }
+            plan_new(deps, request, first.branch.clone(), &worktree_root)?
+        }
+    };
+    let manifest = match deps.state.read_manifest(&slice.id) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            let error = PortError {
+                source: Source::LocalState,
+                message: format!("no manifest for slice {}", slice.id.0),
+            };
+            return Err(preflight(error));
+        }
+        Err(e) => return Err(preflight(e)),
+    };
+    let entry = match report.timer {
+        Some(_) => None,
+        None => deps.timer.entry_today(&slice.ticket).map_err(preflight)?,
+    };
+    let ticket = match (&report.timer, &report.ticket) {
+        (None, None) => return Err(SliceError::UnknownTicket(slice.ticket.clone())),
+        (_, ticket) => ticket.as_ref(),
+    };
+
+    let mut undo = Undo::default();
+    let result = (|| {
+        if let (None, Some(ticket)) = (&report.timer, ticket) {
+            run_entry(deps, ticket, entry, &mut undo).map_err(|e| (Step::StartTimer, e))?;
+        }
+
+        make_worktree(
+            deps,
+            &request.repo,
+            &branch,
+            &worktree,
+            &base_commit,
+            &checkout,
+            &mut undo,
+        )
+        .map_err(|e| (Step::CreateWorktree, e))?;
+
+        let mut repos = slice.repos.clone();
+        repos.push(SliceRepo {
+            repo: request.repo.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+            base_commit: base_commit.clone(),
+        });
+        let added = Manifest {
+            repos: repos.clone(),
+            ..manifest.clone()
+        };
+        deps.state
+            .write_manifest(&added)
+            .map_err(|e| (Step::WriteManifest, e))?;
+        undo.push(Step::WriteManifest, Action::WriteManifest(Box::new(manifest.clone())));
+
+        let updated = ActiveSlice { repos, ..slice.clone() };
+        deps.state.set_active(&updated).map_err(|e| (Step::SetActive, e))?;
+        Ok(updated)
+    })();
+
+    match result {
+        Ok(slice) => Ok(OpenOutcome::Added(slice)),
+        Err((step, error)) => Err(SliceError::StepFailed {
+            step,
+            error,
+            undo_failures: undo.unwind(deps),
+        }),
+    }
 }
 
 /// Run the ticket's entry for today: restart it if there is one, start one
@@ -858,14 +986,27 @@ pub fn abandon_reason(raw: &str) -> Result<String, String> {
 /// with its path, branch and worktree, in the order they were added
 /// (SLICE-10-8).
 pub fn slice_json(s: &ActiveSlice) -> serde_json::Value {
-    let _ = s;
-    todo!("SLICE-10-8")
+    let repos: Vec<_> = s
+        .repos
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "repo": r.repo.display().to_string(),
+                "branch": r.branch,
+                "worktree": r.worktree.display().to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "id": s.id.0, "ticket": s.ticket.0, "repos": repos })
 }
 
 /// The branches close and abandon leave in place, for their messages.
 pub fn kept_branches(s: &ActiveSlice) -> String {
-    let _ = s;
-    todo!("SLICE-10-8")
+    s.repos
+        .iter()
+        .map(|r| format!("{} in {} ({})", r.branch, r.repo.display(), r.worktree.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Stop the timer, mark the manifest abandoned with the request's reason, and

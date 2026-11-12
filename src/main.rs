@@ -163,24 +163,34 @@ fn run(args: &[String]) -> Result<u8, String> {
     }
 }
 
+/// `repo: branch (worktree)` for each repository of the slice, one per line.
+fn repo_lines(s: &ActiveSlice) -> String {
+    s.repos
+        .iter()
+        .map(|r| format!("  {}: {} ({})", r.repo.display(), r.branch, r.worktree.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The new slice's branch and worktree (SLICE-10-8).
 fn opened_text(s: &ActiveSlice) -> String {
-    let _ = s;
-    todo!("SLICE-10-8")
+    format!("opened {}\n{}", s.id.0, repo_lines(s))
 }
 
 /// The added repository, the last of the slice's, with its branch and
 /// worktree (SLICE-10-1, 10-8).
 fn added_text(s: &ActiveSlice) -> String {
-    let _ = s;
-    todo!("SLICE-10-8")
+    let added = ActiveSlice {
+        repos: s.repos.last().cloned().into_iter().collect(),
+        ..s.clone()
+    };
+    format!("added a repository to {}\n{}", s.id.0, repo_lines(&added))
 }
 
 /// The slice line of status: id, ticket, and each repository with its
 /// branch and worktree (SLICE-10-8).
 fn status_text(s: &ActiveSlice) -> String {
-    let _ = s;
-    todo!("SLICE-10-8")
+    format!("slice:  {} for {}\n{}", s.id.0, s.ticket.0, repo_lines(s))
 }
 
 fn opt_ref(r: &Option<TicketRef>) -> String {

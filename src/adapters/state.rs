@@ -26,16 +26,53 @@ fn err(path: &Path, e: impl std::fmt::Display) -> PortError {
     }
 }
 
-/// The on-disk form of [`ActiveSlice`]. A file written before SLICE-10
-/// holds one repository as top-level repo, branch and worktree, and must
-/// still read (SLICE-10-9).
+/// One repository as written in `active.json` and the manifest.
+#[derive(Serialize, Deserialize)]
+struct RepoFile {
+    repo: PathBuf,
+    branch: String,
+    worktree: PathBuf,
+    base_commit: String,
+}
+
+impl From<&SliceRepo> for RepoFile {
+    fn from(r: &SliceRepo) -> RepoFile {
+        RepoFile {
+            repo: r.repo.clone(),
+            branch: r.branch.clone(),
+            worktree: r.worktree.clone(),
+            base_commit: r.base_commit.clone(),
+        }
+    }
+}
+
+impl From<RepoFile> for SliceRepo {
+    fn from(r: RepoFile) -> SliceRepo {
+        SliceRepo {
+            repo: r.repo,
+            branch: r.branch,
+            worktree: r.worktree,
+            base_commit: r.base_commit,
+        }
+    }
+}
+
+/// The on-disk form of [`ActiveSlice`]: id, ticket and a `repos` list. A
+/// file written before SLICE-10 has no list but one repository as top-level
+/// repo, branch and worktree, without its base commit, which then comes
+/// from the manifest (SLICE-10-9).
 #[derive(Serialize, Deserialize)]
 struct ActiveFile {
     id: String,
     ticket: String,
-    repo: PathBuf,
-    branch: String,
-    worktree: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repos: Option<Vec<RepoFile>>,
+    #[serde(default, skip_serializing)]
+    repo: Option<PathBuf>,
+    #[serde(default, skip_serializing)]
+    branch: Option<String>,
+    #[serde(default, skip_serializing)]
+    worktree: Option<PathBuf>,
 }
 
 impl FileState {
@@ -90,8 +127,32 @@ impl StateStore for FileState {
             Err(e) => return Err(err(&path, e)),
         };
         let f: ActiveFile = serde_json::from_str(&text).map_err(|e| err(&path, e))?;
-        let _ = f;
-        todo!("SLICE-10-9")
+        let id = SliceId(f.id);
+        let repos = match (f.repos, f.repo, f.branch, f.worktree) {
+            (Some(repos), ..) => repos.into_iter().map(SliceRepo::from).collect(),
+            (None, Some(repo), Some(branch), Some(worktree)) => {
+                let manifest = self
+                    .read_manifest(&id)?
+                    .ok_or_else(|| err(&path, format!("no manifest for slice {}", id.0)))?;
+                let base_commit = manifest
+                    .repos
+                    .first()
+                    .map(|r| r.base_commit.clone())
+                    .unwrap_or_default();
+                vec![SliceRepo {
+                    repo,
+                    branch,
+                    worktree,
+                    base_commit,
+                }]
+            }
+            _ => return Err(err(&path, "no repositories")),
+        };
+        Ok(Some(ActiveSlice {
+            id,
+            ticket: TicketRef(f.ticket),
+            repos,
+        }))
     }
 
     fn next_slice_id(&self, ticket: &TicketRef) -> PortResult<SliceId> {
@@ -105,8 +166,15 @@ impl StateStore for FileState {
         let count = counts.entry(slice.ticket.0.clone()).or_insert(0);
         *count = (*count).max(n);
         self.write_json(&self.counts_path(), &counts)?;
-        let _ = slice;
-        todo!("SLICE-10-9")
+        let file = ActiveFile {
+            id: slice.id.0.clone(),
+            ticket: slice.ticket.0.clone(),
+            repos: Some(slice.repos.iter().map(RepoFile::from).collect()),
+            repo: None,
+            branch: None,
+            worktree: None,
+        };
+        self.write_json(&self.active_path(), &file)
     }
 
     fn clear_active(&self) -> PortResult<()> {
@@ -172,8 +240,17 @@ pub fn manifest_yaml(m: &Manifest) -> String {
         .as_deref()
         .map(|r| format!("abandon_reason: {}\n", q(r)))
         .unwrap_or_default();
-    let _ = (q, list, opt, system, status, budgets, reason);
-    todo!("SLICE-10-9")
+    let repos: Vec<RepoFile> = m.repos.iter().map(RepoFile::from).collect();
+    let repos = serde_json::to_string(&repos).expect("repositories serialize");
+    format!(
+        "id: {}\nticket: {}\nticket_system: {system}\nrepos: {repos}\nstatus: {status}\nacceptance_criteria: {}\ninvariants: {}\nspec_hash: {}\ntest_hash: {}\n{reason}budgets:{budgets}\n",
+        q(&m.id.0),
+        q(&m.ticket.0),
+        list(&m.acceptance_criteria),
+        list(&m.invariants),
+        opt(&m.spec_hash),
+        opt(&m.test_hash),
+    )
 }
 
 /// Read back what [`manifest_yaml`] writes. Not a general YAML parser: each
@@ -223,8 +300,16 @@ pub fn parse_manifest_yaml(text: &str) -> Result<Manifest, String> {
 /// The manifest's repositories. One written before SLICE-10 has top-level
 /// branch and base_commit for its one repository, and no repository path.
 fn manifest_repos(fields: &BTreeMap<&str, &str>) -> Result<Vec<SliceRepo>, String> {
-    let _ = fields;
-    todo!("SLICE-10-9")
+    if let Some(repos) = fields.get("repos") {
+        return Ok(json::<Vec<RepoFile>>(repos)?.into_iter().map(SliceRepo::from).collect());
+    }
+    let field = |k: &str| fields.get(k).copied().ok_or_else(|| format!("missing {k}"));
+    Ok(vec![SliceRepo {
+        repo: PathBuf::new(),
+        branch: json(field("branch")?)?,
+        worktree: PathBuf::new(),
+        base_commit: json(field("base_commit")?)?,
+    }])
 }
 
 fn json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, String> {

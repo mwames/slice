@@ -38,8 +38,12 @@ impl Git {
     /// The main working tree of the repository containing `dir`, which may
     /// be inside one of its worktrees (SLICE-10-7).
     pub fn repository(dir: &Path) -> PortResult<PathBuf> {
-        let _ = dir;
-        todo!("SLICE-10-7")
+        // The first worktree listed is the main one, from any of them.
+        let out = git(dir, &["worktree", "list", "--porcelain"])?;
+        out.lines()
+            .find_map(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .ok_or_else(|| err(format!("no worktree listed for {}", dir.display())))
     }
 }
 
