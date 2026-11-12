@@ -45,14 +45,18 @@ fn assert_opened(
     );
 
     assert_eq!(w.tickets[ticket].status, in_progress);
-    assert_eq!(slice.branch, branch);
+    let [repo] = slice.repos.as_slice() else {
+        panic!("want one repository, got {:?}", slice.repos)
+    };
+    assert_eq!(repo.repo, PathBuf::from(REPO));
+    assert_eq!(repo.branch, branch);
     assert!(w.branches.contains_key(branch), "branch {branch} exists");
-    assert_eq!(w.worktrees.get(branch), Some(&slice.worktree), "worktree checked out");
+    assert_eq!(w.worktrees.get(branch), Some(&repo.worktree), "worktree checked out");
 
     let manifest = w.manifests.get(&slice.id).expect("manifest written");
     assert_eq!(manifest.ticket, tref(ticket));
-    assert_eq!(manifest.branch, branch);
-    assert_eq!(manifest.base_commit, base);
+    assert_eq!(manifest.repos, slice.repos);
+    assert_eq!(manifest.repos[0].base_commit, base);
     assert_eq!(manifest.status, ManifestStatus::Open);
 
     assert_eq!(w.active.as_ref(), Some(&slice));
@@ -68,7 +72,10 @@ fn clean_open() {
 
     let slice = assert_opened(&fake, outcome, T, "development", T_BRANCH_NEW, BASE_COMMIT);
     assert_eq!(fake.snapshot().entries.len(), 1, "one new entry");
-    assert!(!slice.branch.contains(&slice.id.0), "branch name has no slice id");
+    assert!(
+        !slice.repos[0].branch.contains(&slice.id.0),
+        "branch name has no slice id"
+    );
 }
 
 // SLICE-2-1

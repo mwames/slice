@@ -185,6 +185,7 @@ proptest! {
             prop_assert_eq!(&after.branches, &before.branches, "branches");
             prop_assert_eq!(&after.worktrees, &before.worktrees, "worktrees");
             prop_assert_eq!(&after.manifests, &before.manifests, "manifests");
+            prop_assert_eq!(&after.active, &before.active, "active slice");
             prop_assert_eq!(&after.tickets, &before.tickets, "ticket statuses");
         }
     }

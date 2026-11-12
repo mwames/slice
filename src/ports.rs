@@ -53,57 +53,277 @@ pub struct SliceId(pub String);
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BranchType(pub String);
 
-/// A ticket's branch name, `<type>/<yyyymmdd>-<REF>-<short title>`, taken
-/// apart.
+/// A ticket's branch name taken apart: the parts a [`BranchTemplate`] writes
+/// and recognizes (SLICE-11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchName {
-    pub branch_type: BranchType,
-    /// `yyyymmdd`, the day the branch was created.
-    pub date: String,
+    /// `None` when the template has no `{type}`.
+    pub branch_type: Option<BranchType>,
+    /// `yyyymmdd`, the day the branch was created. `None` unless the
+    /// template gives a full date: `{date}`, or `{yyyy}`, `{mm}` and `{dd}`.
+    pub date: Option<String>,
     pub ticket: TicketRef,
     pub short_title: String,
 }
 
 impl BranchName {
-    /// Name the branch for a new slice of `ticket` created on `date`.
-    pub fn new(branch_type: &BranchType, date: &str, ticket: &Ticket) -> BranchName {
+    /// The parts for a new branch of `ticket` created on `date`.
+    pub fn new(branch_type: Option<&BranchType>, date: &str, ticket: &Ticket) -> BranchName {
         BranchName {
-            branch_type: branch_type.clone(),
-            date: date.to_string(),
+            branch_type: branch_type.cloned(),
+            date: Some(date.to_string()),
             ticket: ticket.reference.clone(),
             short_title: short_title(&ticket.title),
         }
     }
+}
 
-    /// Parse a branch name; `None` unless it has the ticket-branch shape.
-    pub fn parse(name: &str) -> Option<BranchName> {
-        let (branch_type, rest) = name.split_once('/')?;
-        if branch_type.is_empty() || !branch_type.bytes().all(|b| b.is_ascii_lowercase()) || rest.contains('/') {
-            return None;
-        }
-        let (date, rest) = rest.split_at_checked(8)?;
-        let rest = rest.strip_prefix('-')?;
-        if !date.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        // <PREFIX>-<digits>, then optionally -<short title>.
-        let (prefix, rest) = rest.split_once('-')?;
-        let mut chars = prefix.bytes();
-        if !chars.next().is_some_and(|b| b.is_ascii_uppercase())
-            || !chars.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        {
-            return None;
-        }
-        let (number, short_title) = rest.split_once('-').unwrap_or((rest, ""));
-        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        Some(BranchName {
-            branch_type: BranchType(branch_type.to_string()),
-            date: date.to_string(),
-            ticket: TicketRef(format!("{prefix}-{number}")),
-            short_title: short_title.to_string(),
+/// A branch name template: literal text with the placeholders `{type}`,
+/// `{date}`, `{yyyy}`, `{mm}`, `{dd}`, `{ticket}` and `{title}` (SLICE-11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchTemplate {
+    tokens: Vec<Token>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Token {
+    Literal(String),
+    Type,
+    Date,
+    Yyyy,
+    Mm,
+    Dd,
+    Ticket,
+    Title,
+}
+
+impl Token {
+    fn placeholder(name: &str) -> Option<Token> {
+        Some(match name {
+            "type" => Token::Type,
+            "date" => Token::Date,
+            "yyyy" => Token::Yyyy,
+            "mm" => Token::Mm,
+            "dd" => Token::Dd,
+            "ticket" => Token::Ticket,
+            "title" => Token::Title,
+            _ => return None,
         })
+    }
+
+    /// The number of digits a date placeholder matches.
+    fn width(&self) -> Option<usize> {
+        match self {
+            Token::Date => Some(8),
+            Token::Yyyy => Some(4),
+            Token::Mm | Token::Dd => Some(2),
+            _ => None,
+        }
+    }
+
+    fn is_placeholder(&self) -> bool {
+        !matches!(self, Token::Literal(_))
+    }
+}
+
+impl BranchTemplate {
+    /// The template for a repository no config entry matches (SLICE-11-1).
+    pub const DEFAULT: &str = "{type}/{date}-{ticket}-{title}";
+
+    /// Check a template, or say what is wrong with it (SLICE-11-7).
+    pub fn parse(text: &str) -> Result<BranchTemplate, String> {
+        let mut tokens: Vec<Token> = Vec::new();
+        let mut literal = String::new();
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            match c {
+                '{' => {
+                    let end = rest.find('}').ok_or("unmatched `{`")?;
+                    let name = &rest[1..end];
+                    if name.contains('{') {
+                        return Err("unmatched `{`".to_string());
+                    }
+                    let Some(token) = Token::placeholder(name) else {
+                        return Err(format!("unknown placeholder {{{name}}}"));
+                    };
+                    if tokens.contains(&token) {
+                        return Err(format!("{{{name}}} is used more than once"));
+                    }
+                    if !literal.is_empty() {
+                        tokens.push(Token::Literal(std::mem::take(&mut literal)));
+                    }
+                    tokens.push(token);
+                    rest = &rest[end + 1..];
+                }
+                '}' => return Err("unmatched `}`".to_string()),
+                _ => {
+                    literal.push(c);
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+        }
+        if !literal.is_empty() {
+            tokens.push(Token::Literal(literal));
+        }
+        if !tokens.contains(&Token::Ticket) {
+            return Err("it lacks {ticket}".to_string());
+        }
+        if !tokens.contains(&Token::Title) {
+            return Err("it lacks {title}".to_string());
+        }
+        let adjacent = tokens.windows(2).any(|w| {
+            w[0].is_placeholder() && w[1].is_placeholder() && w[0].width().is_none() && w[1].width().is_none()
+        });
+        if adjacent {
+            return Err("two placeholders next to each other can't be told apart".to_string());
+        }
+        Ok(BranchTemplate { tokens })
+    }
+
+    /// Whether names from this template carry a type (SLICE-11-6).
+    pub fn has_type(&self) -> bool {
+        self.tokens.contains(&Token::Type)
+    }
+
+    /// The branch name for `name`'s parts. `name` has a type when the
+    /// template has `{type}`, and a date when it has any date placeholder.
+    /// An empty short title drops `{title}` and the literal text directly
+    /// before it (SLICE-11-8).
+    pub fn render(&self, name: &BranchName) -> String {
+        let tokens = if name.short_title.is_empty() {
+            self.without_title()
+        } else {
+            self.tokens.clone()
+        };
+        let date = name.date.as_deref().unwrap_or_default();
+        let part = |from: usize, to: usize| date.get(from..to).unwrap_or_default();
+        let mut out = String::new();
+        for token in &tokens {
+            match token {
+                Token::Literal(text) => out.push_str(text),
+                Token::Type => out.push_str(name.branch_type.as_ref().map_or("", |t| t.0.as_str())),
+                Token::Date => out.push_str(date),
+                Token::Yyyy => out.push_str(part(0, 4)),
+                Token::Mm => out.push_str(part(4, 6)),
+                Token::Dd => out.push_str(part(6, 8)),
+                Token::Ticket => out.push_str(&name.ticket.0),
+                Token::Title => out.push_str(&name.short_title),
+            }
+        }
+        out
+    }
+
+    /// The tokens without `{title}` and the literal directly before it.
+    fn without_title(&self) -> Vec<Token> {
+        let mut tokens = self.tokens.clone();
+        if let Some(at) = tokens.iter().position(|t| *t == Token::Title) {
+            tokens.remove(at);
+            if at > 0 && !tokens[at - 1].is_placeholder() {
+                tokens.remove(at - 1);
+            }
+        }
+        tokens
+    }
+
+    /// `branch`'s parts when the whole name matches the template
+    /// (SLICE-11-3, 11-4).
+    pub fn recognize(&self, branch: &str) -> Option<BranchName> {
+        let mut caps = Vec::new();
+        if !matches(&self.tokens, branch, &mut caps) {
+            caps.clear();
+            if !matches(&self.without_title(), branch, &mut caps) {
+                return None;
+            }
+        }
+        let mut name = BranchName {
+            branch_type: None,
+            date: None,
+            ticket: TicketRef(String::new()),
+            short_title: String::new(),
+        };
+        let (mut yyyy, mut mm, mut dd) = (None, None, None);
+        for (token, text) in caps {
+            let text = text.to_string();
+            match token {
+                Token::Type => name.branch_type = Some(BranchType(text)),
+                Token::Date => name.date = Some(text),
+                Token::Yyyy => yyyy = Some(text),
+                Token::Mm => mm = Some(text),
+                Token::Dd => dd = Some(text),
+                Token::Ticket => name.ticket = TicketRef(text),
+                Token::Title => name.short_title = text,
+                Token::Literal(_) => {}
+            }
+        }
+        if let (Some(y), Some(m), Some(d)) = (yyyy, mm, dd) {
+            name.date.get_or_insert(format!("{y}{m}{d}"));
+        }
+        Some(name)
+    }
+}
+
+/// Match `tokens` against all of `s`, trying every length a variable-width
+/// placeholder can take, and record what each placeholder matched.
+fn matches<'a>(tokens: &[Token], s: &'a str, caps: &mut Vec<(Token, &'a str)>) -> bool {
+    let Some((token, rest)) = tokens.split_first() else {
+        return s.is_empty();
+    };
+    let ends: Vec<usize> = match token {
+        Token::Literal(text) => {
+            return s
+                .strip_prefix(text.as_str())
+                .is_some_and(|tail| matches(rest, tail, caps));
+        }
+        Token::Type => {
+            let run = s.bytes().take_while(u8::is_ascii_lowercase).count();
+            (1..=run).collect()
+        }
+        Token::Ticket => ticket_ends(s),
+        Token::Title => s
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(s.len()))
+            .collect(),
+        fixed => {
+            let width = fixed.width().expect("a date placeholder");
+            if s.len() >= width && s.as_bytes()[..width].iter().all(u8::is_ascii_digit) {
+                vec![width]
+            } else {
+                vec![]
+            }
+        }
+    };
+    for end in ends {
+        caps.push((token.clone(), &s[..end]));
+        if matches(rest, &s[end..], caps) {
+            return true;
+        }
+        caps.pop();
+    }
+    false
+}
+
+/// The lengths of the ticket references `s` starts with: uppercase letters
+/// and digits starting with a letter, a hyphen, then one or more digits.
+fn ticket_ends(s: &str) -> Vec<usize> {
+    let bytes = s.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_uppercase) {
+        return Vec::new();
+    }
+    let word = bytes
+        .iter()
+        .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        .count();
+    if bytes.get(word) != Some(&b'-') {
+        return Vec::new();
+    }
+    let digits = bytes[word + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
+    (1..=digits).map(|n| word + 1 + n).collect()
+}
+
+impl Default for BranchTemplate {
+    fn default() -> BranchTemplate {
+        BranchTemplate::parse(BranchTemplate::DEFAULT).expect("the default template is valid")
     }
 }
 
@@ -132,14 +352,14 @@ fn short_title(title: &str) -> String {
     out
 }
 
-impl fmt::Display for BranchName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}-{}", self.branch_type.0, self.date, self.ticket.0)?;
-        if !self.short_title.is_empty() {
-            write!(f, "-{}", self.short_title)?;
-        }
-        Ok(())
-    }
+/// One repository of a slice (SLICE-10). `repo` is the repository's main
+/// working tree, never one of its worktrees.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SliceRepo {
+    pub repo: PathBuf,
+    pub branch: String,
+    pub worktree: PathBuf,
+    pub base_commit: String,
 }
 
 /// The active slice, as recorded in local state.
@@ -147,9 +367,9 @@ impl fmt::Display for BranchName {
 pub struct ActiveSlice {
     pub id: SliceId,
     pub ticket: TicketRef,
-    pub repo: PathBuf,
-    pub branch: String,
-    pub worktree: PathBuf,
+    /// In the order they were added; the first is the one the slice was
+    /// opened in, whose branch name every later repository takes.
+    pub repos: Vec<SliceRepo>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,14 +381,14 @@ pub enum ManifestStatus {
 }
 
 /// The slice manifest, kept in local state by slice id. Everything after
-/// `base_commit` is filled in by later pipeline stages; open leaves it empty.
+/// `repos` is filled in by later pipeline stages; open leaves it empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub id: SliceId,
     pub ticket: TicketRef,
     pub ticket_system: TicketSystemKind,
-    pub branch: String,
-    pub base_commit: String,
+    /// The same repositories, in the same order, as the active slice.
+    pub repos: Vec<SliceRepo>,
     pub status: ManifestStatus,
     pub acceptance_criteria: Vec<String>,
     pub invariants: Vec<String>,
@@ -206,6 +426,43 @@ pub struct Settings {
     pub done: Statuses,
     /// Directory for worktrees; `None` means `<repo>/../<repo>.slices/`.
     pub worktree_root: Option<PathBuf>,
+    /// Branch templates by repository path pattern, in config order, with
+    /// `~` already expanded (SLICE-11-5).
+    pub branch_templates: Vec<(PathBuf, BranchTemplate)>,
+}
+
+impl Settings {
+    /// The template of the first entry whose pattern matches `repo`, a
+    /// main working tree, as a whole path; `*` matches within one path
+    /// segment. The default when none does (SLICE-11-1, 11-5).
+    pub fn template_for(&self, repo: &Path) -> BranchTemplate {
+        self.branch_templates
+            .iter()
+            .find(|(pattern, _)| path_matches(pattern, repo))
+            .map(|(_, template)| template.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// Whether `path` matches `pattern` segment by segment, where `*` matches
+/// any characters within one segment.
+fn path_matches(pattern: &Path, path: &Path) -> bool {
+    let segments = |p: &Path| {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+    };
+    let (pattern, path) = (segments(pattern), segments(path));
+    pattern.len() == path.len() && pattern.iter().zip(&path).all(|(p, s)| glob(p, s))
+}
+
+fn glob(pattern: &str, text: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == text,
+        Some((head, tail)) => text
+            .strip_prefix(head)
+            .is_some_and(|rest| (0..=rest.len()).any(|i| rest.is_char_boundary(i) && glob(tail, &rest[i..]))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,6 +717,9 @@ pub enum OpenOutcome {
     /// The slice for this ticket was open but paused; its timer is running
     /// again (SLICE-2-7).
     Resumed(ActiveSlice),
+    /// The request's repository was added to the active slice, and is the
+    /// last of its `repos` (SLICE-10-1, 10-3, 10-4).
+    Added(ActiveSlice),
 }
 
 /// Open a slice for the requested ticket: stop any stray timer, run the
@@ -479,44 +739,15 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
         Err(e) => return Err(failed(Step::ResolveTicket, e)),
     };
 
-    let mut existing: Vec<String> = deps
-        .vcs
-        .branches(&request.repo)
-        .map_err(preflight)?
-        .into_iter()
-        .filter(|b| BranchName::parse(b).is_some_and(|n| n.ticket == ticket.reference))
-        .collect();
-    if existing.len() > 1 {
-        existing.sort();
-        return Err(SliceError::AmbiguousBranch(existing));
-    }
+    let existing = existing_branch(deps, &request.repo, &ticket.reference)?;
     let worktree_root = worktree_root(deps.settings, &request.repo);
-    // (branch, worktree, base commit, how to make the worktree)
-    let (branch, worktree, base_commit, checkout) = match existing.pop() {
-        Some(branch) => {
-            let parsed = BranchName::parse(&branch).expect("filtered on parse");
-            let type_differs = request.branch_type.as_ref().is_some_and(|t| *t != parsed.branch_type);
-            if request.base.is_some() || type_differs {
-                return Err(SliceError::BranchOptionsConflict { branch });
-            }
-            let base_commit = deps.vcs.resolve(&request.repo, &branch).map_err(preflight)?;
-            match deps.vcs.worktree_of(&request.repo, &branch).map_err(preflight)? {
-                Some(path) => (branch, path, base_commit, Checkout::Existing),
-                None => {
-                    let path = worktree_root.join(branch.replace('/', "-"));
-                    (branch, path, base_commit, Checkout::AddWorktree)
-                }
-            }
-        }
+    let (branch, worktree, base_commit, checkout) = match existing {
+        Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
         None => {
-            let Some(branch_type) = &request.branch_type else {
-                return Err(SliceError::TypeRequired);
-            };
-            let branch = BranchName::new(branch_type, deps.today, &ticket).to_string();
-            let base = request.base.as_deref().unwrap_or("HEAD");
-            let base_commit = deps.vcs.resolve(&request.repo, base).map_err(preflight)?;
-            let path = worktree_root.join(branch.replace('/', "-"));
-            (branch, path, base_commit, Checkout::CreateBranch)
+            let template = deps.settings.template_for(&request.repo);
+            let branch_type = new_branch_type(&template, request.branch_type.as_ref())?;
+            let branch = template.render(&BranchName::new(branch_type, deps.today, &ticket));
+            plan_new(deps, request, branch, &worktree_root)?
         }
     };
     let id = deps.state.next_slice_id(&ticket.reference).map_err(preflight)?;
@@ -540,34 +771,28 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
             Action::SetStatus(ticket.reference.clone(), ticket.status.clone()),
         );
 
-        match checkout {
-            Checkout::Existing => {}
-            Checkout::AddWorktree => {
-                deps.vcs
-                    .add_worktree(&request.repo, &branch, &worktree)
-                    .map_err(|e| (Step::CreateWorktree, e))?;
-                undo.push(
-                    Step::CreateWorktree,
-                    Action::RemoveWorktree(request.repo.clone(), worktree.clone()),
-                );
-            }
-            Checkout::CreateBranch => {
-                deps.vcs
-                    .create_branch(&request.repo, &branch, &worktree, &base_commit)
-                    .map_err(|e| (Step::CreateWorktree, e))?;
-                undo.push(
-                    Step::CreateWorktree,
-                    Action::RemoveBranch(request.repo.clone(), branch.clone(), worktree.clone()),
-                );
-            }
-        }
+        make_worktree(
+            deps,
+            &request.repo,
+            &branch,
+            &worktree,
+            &base_commit,
+            &checkout,
+            &mut undo,
+        )
+        .map_err(|e| (Step::CreateWorktree, e))?;
 
+        let repo = SliceRepo {
+            repo: request.repo.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+            base_commit: base_commit.clone(),
+        };
         let manifest = Manifest {
             id: id.clone(),
             ticket: ticket.reference.clone(),
             ticket_system: ticket.system,
-            branch: branch.clone(),
-            base_commit: base_commit.clone(),
+            repos: vec![repo.clone()],
             status: ManifestStatus::Open,
             acceptance_criteria: Vec::new(),
             invariants: Vec::new(),
@@ -584,9 +809,7 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
         let slice = ActiveSlice {
             id: id.clone(),
             ticket: ticket.reference.clone(),
-            repo: request.repo.clone(),
-            branch: branch.clone(),
-            worktree: worktree.clone(),
+            repos: vec![repo],
         };
         deps.state.set_active(&slice).map_err(|e| (Step::SetActive, e))?;
         Ok(slice)
@@ -600,6 +823,105 @@ pub fn open(deps: &Deps, request: &OpenRequest) -> Result<OpenOutcome, SliceErro
             undo_failures: undo.unwind(deps),
         }),
     }
+}
+
+/// The type a new branch is named with: the request's when the template has
+/// `{type}`, and required then; none otherwise (SLICE-11-6).
+fn new_branch_type<'a>(
+    template: &BranchTemplate,
+    requested: Option<&'a BranchType>,
+) -> Result<Option<&'a BranchType>, SliceError> {
+    match (template.has_type(), requested) {
+        (false, _) => Ok(None),
+        (true, None) => Err(SliceError::TypeRequired),
+        (true, Some(t)) => Ok(Some(t)),
+    }
+}
+
+/// The one branch in `repo` for the ticket, if any; more than one is
+/// refused (SLICE-2-12).
+fn existing_branch(deps: &Deps, repo: &Path, ticket: &TicketRef) -> Result<Option<String>, SliceError> {
+    let template = deps.settings.template_for(repo);
+    let mut existing: Vec<String> = deps
+        .vcs
+        .branches(repo)
+        .map_err(|e| failed(Step::Preflight, e))?
+        .into_iter()
+        .filter(|b| template.recognize(b).is_some_and(|n| n.ticket == *ticket))
+        .collect();
+    if existing.len() > 1 {
+        existing.sort();
+        return Err(SliceError::AmbiguousBranch(existing));
+    }
+    Ok(existing.pop())
+}
+
+/// (branch, worktree, base commit, how to make the worktree)
+type Plan = (String, PathBuf, String, Checkout);
+
+/// Use `branch`, which exists in the request's repository: refused with
+/// --base or a --type other than its own (SLICE-2-10).
+fn plan_existing(deps: &Deps, request: &OpenRequest, branch: String, worktree_root: &Path) -> Result<Plan, SliceError> {
+    let preflight = |e| failed(Step::Preflight, e);
+    let template = deps.settings.template_for(&request.repo);
+    let parsed = template.recognize(&branch).expect("filtered on recognize");
+    let type_differs = template.has_type()
+        && request
+            .branch_type
+            .as_ref()
+            .is_some_and(|t| Some(t) != parsed.branch_type.as_ref());
+    if request.base.is_some() || type_differs {
+        return Err(SliceError::BranchOptionsConflict { branch });
+    }
+    let base_commit = deps.vcs.resolve(&request.repo, &branch).map_err(preflight)?;
+    match deps.vcs.worktree_of(&request.repo, &branch).map_err(preflight)? {
+        Some(path) => Ok((branch, path, base_commit, Checkout::Existing)),
+        None => {
+            let path = worktree_root.join(branch.replace('/', "-"));
+            Ok((branch, path, base_commit, Checkout::AddWorktree))
+        }
+    }
+}
+
+/// Create `branch` in the request's repository, at --base or `HEAD`.
+fn plan_new(deps: &Deps, request: &OpenRequest, branch: String, worktree_root: &Path) -> Result<Plan, SliceError> {
+    let base = request.base.as_deref().unwrap_or("HEAD");
+    let base_commit = deps
+        .vcs
+        .resolve(&request.repo, base)
+        .map_err(|e| failed(Step::Preflight, e))?;
+    let path = worktree_root.join(branch.replace('/', "-"));
+    Ok((branch, path, base_commit, Checkout::CreateBranch))
+}
+
+/// Make the worktree the checkout calls for, pushing the matching undo.
+fn make_worktree(
+    deps: &Deps,
+    repo: &Path,
+    branch: &str,
+    worktree: &Path,
+    base_commit: &str,
+    checkout: &Checkout,
+    undo: &mut Undo,
+) -> PortResult<()> {
+    match checkout {
+        Checkout::Existing => {}
+        Checkout::AddWorktree => {
+            deps.vcs.add_worktree(repo, branch, worktree)?;
+            undo.push(
+                Step::CreateWorktree,
+                Action::RemoveWorktree(repo.to_path_buf(), worktree.to_path_buf()),
+            );
+        }
+        Checkout::CreateBranch => {
+            deps.vcs.create_branch(repo, branch, worktree, base_commit)?;
+            undo.push(
+                Step::CreateWorktree,
+                Action::RemoveBranch(repo.to_path_buf(), branch.to_string(), worktree.to_path_buf()),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// How open gets a worktree for the slice's branch.
@@ -624,9 +946,129 @@ fn reopen(
     if slice.ticket != request.ticket {
         return Err(SliceError::AnotherSliceActive(Box::new(slice.clone())));
     }
+    if !slice.repos.iter().any(|r| r.repo == request.repo) {
+        return add_repo(deps, request, slice, report);
+    }
     match resume_active(deps, slice, report)? {
         ResumeOutcome::Resumed(slice) => Ok(OpenOutcome::Resumed(slice)),
         ResumeOutcome::AlreadyRunning(slice) => Ok(OpenOutcome::AlreadyOpen(slice)),
+    }
+}
+
+/// Add the request's repository to the active slice for the same ticket:
+/// use or create its branch, named as the first repository's, and worktree,
+/// run the ticket's entry for today if it is stopped, and record the
+/// repository in the manifest and the active slice (SLICE-10).
+fn add_repo(
+    deps: &Deps,
+    request: &OpenRequest,
+    slice: &ActiveSlice,
+    report: &StatusReport,
+) -> Result<OpenOutcome, SliceError> {
+    if report.mismatch.is_some() {
+        return Err(SliceError::Inconsistent(Box::new(report.clone())));
+    }
+    let preflight = |e| failed(Step::Preflight, e);
+    let first = &slice.repos[0];
+    let worktree_root = worktree_root(deps.settings, &request.repo);
+    let (branch, worktree, base_commit, checkout) = match existing_branch(deps, &request.repo, &slice.ticket)? {
+        Some(branch) => plan_existing(deps, request, branch, &worktree_root)?,
+        None => {
+            // A new branch is written with this repository's template from
+            // the parts of the slice's first branch.
+            let template = deps.settings.template_for(&request.repo);
+            let first_name = deps.settings.template_for(&first.repo).recognize(&first.branch);
+            let branch = match first_name {
+                Some(first_name) => {
+                    let first_type = first_name.branch_type.as_ref();
+                    let type_differs = template.has_type()
+                        && first_type.is_some_and(|f| request.branch_type.as_ref().is_some_and(|t| t != f));
+                    if type_differs {
+                        return Err(SliceError::BranchOptionsConflict {
+                            branch: first.branch.clone(),
+                        });
+                    }
+                    let branch_type = match first_type {
+                        Some(t) if template.has_type() => Some(t),
+                        _ => new_branch_type(&template, request.branch_type.as_ref())?,
+                    };
+                    template.render(&BranchName {
+                        branch_type: branch_type.cloned(),
+                        date: Some(first_name.date.clone().unwrap_or_else(|| deps.today.to_string())),
+                        ticket: slice.ticket.clone(),
+                        short_title: first_name.short_title.clone(),
+                    })
+                }
+                None => first.branch.clone(),
+            };
+            plan_new(deps, request, branch, &worktree_root)?
+        }
+    };
+    let manifest = match deps.state.read_manifest(&slice.id) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            let error = PortError {
+                source: Source::LocalState,
+                message: format!("no manifest for slice {}", slice.id.0),
+            };
+            return Err(preflight(error));
+        }
+        Err(e) => return Err(preflight(e)),
+    };
+    let entry = match report.timer {
+        Some(_) => None,
+        None => deps.timer.entry_today(&slice.ticket).map_err(preflight)?,
+    };
+    let ticket = match (&report.timer, &report.ticket) {
+        (None, None) => return Err(SliceError::UnknownTicket(slice.ticket.clone())),
+        (_, ticket) => ticket.as_ref(),
+    };
+
+    let mut undo = Undo::default();
+    let result = (|| {
+        if let (None, Some(ticket)) = (&report.timer, ticket) {
+            run_entry(deps, ticket, entry, &mut undo).map_err(|e| (Step::StartTimer, e))?;
+        }
+
+        make_worktree(
+            deps,
+            &request.repo,
+            &branch,
+            &worktree,
+            &base_commit,
+            &checkout,
+            &mut undo,
+        )
+        .map_err(|e| (Step::CreateWorktree, e))?;
+
+        let mut repos = slice.repos.clone();
+        repos.push(SliceRepo {
+            repo: request.repo.clone(),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+            base_commit: base_commit.clone(),
+        });
+        let added = Manifest {
+            repos: repos.clone(),
+            ..manifest.clone()
+        };
+        deps.state
+            .write_manifest(&added)
+            .map_err(|e| (Step::WriteManifest, e))?;
+        undo.push(Step::WriteManifest, Action::WriteManifest(Box::new(manifest.clone())));
+
+        let updated = ActiveSlice { repos, ..slice.clone() };
+        deps.state.set_active(&updated).map_err(|e| (Step::SetActive, e))?;
+        Ok(updated)
+    })();
+
+    match result {
+        Ok(slice) => Ok(OpenOutcome::Added(slice)),
+        Err((step, error)) => Err(SliceError::StepFailed {
+            step,
+            error,
+            undo_failures: undo.unwind(deps),
+        }),
     }
 }
 
@@ -792,8 +1234,10 @@ impl Abandoned {
     /// The line printed without --json.
     pub fn message(&self) -> String {
         let line = format!(
-            "abandoned {}; {} left as it was; branch {} kept",
-            self.slice.id.0, self.slice.ticket.0, self.slice.branch
+            "abandoned {}; {} left as it was; {} kept",
+            self.slice.id.0,
+            self.slice.ticket.0,
+            kept_branches(&self.slice)
         );
         match &self.reason {
             Some(reason) => format!("{line}; reason: {reason}"),
@@ -819,12 +1263,31 @@ pub fn abandon_reason(raw: &str) -> Result<String, String> {
     Ok(reason.to_string())
 }
 
-/// A slice as `--json` output reports it.
+/// A slice as `--json` output reports it: id, ticket, and each repository
+/// with its path, branch and worktree, in the order they were added
+/// (SLICE-10-8).
 pub fn slice_json(s: &ActiveSlice) -> serde_json::Value {
-    serde_json::json!({
-        "id": s.id.0, "ticket": s.ticket.0, "repo": s.repo, "branch": s.branch,
-        "worktree": s.worktree,
-    })
+    let repos: Vec<_> = s
+        .repos
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "repo": r.repo.display().to_string(),
+                "branch": r.branch,
+                "worktree": r.worktree.display().to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "id": s.id.0, "ticket": s.ticket.0, "repos": repos })
+}
+
+/// The branches close and abandon leave in place, for their messages.
+pub fn kept_branches(s: &ActiveSlice) -> String {
+    s.repos
+        .iter()
+        .map(|r| format!("{} in {} ({})", r.branch, r.repo.display(), r.worktree.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Stop the timer, mark the manifest abandoned with the request's reason, and

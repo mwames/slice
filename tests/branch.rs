@@ -1,4 +1,5 @@
-//! Branch names: `<type>/<yyyymmdd>-<REF>-<short title>` (SLICE-2's rationale).
+//! Branch names: `<type>/<yyyymmdd>-<REF>-<short title>` (SLICE-2's rationale),
+//! the default branch template (SLICE-11-1).
 
 use slice::ports::*;
 
@@ -12,7 +13,16 @@ fn ticket(r: &str, title: &str) -> Ticket {
 }
 
 fn name(title: &str) -> String {
-    BranchName::new(&BranchType("feature".into()), "20261102", &ticket("TBOARD-405", title)).to_string()
+    let parts = BranchName::new(
+        Some(&BranchType("feature".into())),
+        "20261102",
+        &ticket("TBOARD-405", title),
+    );
+    BranchTemplate::default().render(&parts)
+}
+
+fn recognize(branch: &str) -> Option<BranchName> {
+    BranchTemplate::default().recognize(branch)
 }
 
 // SLICE-2-1
@@ -53,14 +63,17 @@ fn title_with_no_letters_or_digits_leaves_no_trailing_hyphen() {
 // SLICE-2-9
 #[test]
 fn parse_takes_a_branch_name_apart() {
-    let b = BranchName::parse("bug/20261020-ENG-14795-login-crash").expect("parses");
-    assert_eq!(b.branch_type, BranchType("bug".into()));
-    assert_eq!(b.date, "20261020");
+    let b = recognize("bug/20261020-ENG-14795-login-crash").expect("parses");
+    assert_eq!(b.branch_type, Some(BranchType("bug".into())));
+    assert_eq!(b.date.as_deref(), Some("20261020"));
     assert_eq!(b.ticket, TicketRef("ENG-14795".into()));
     assert_eq!(b.short_title, "login-crash");
-    assert_eq!(b.to_string(), "bug/20261020-ENG-14795-login-crash");
+    assert_eq!(
+        BranchTemplate::default().render(&b),
+        "bug/20261020-ENG-14795-login-crash"
+    );
 
-    let bare = BranchName::parse("feature/20261102-TBOARD-405").expect("parses with no title");
+    let bare = recognize("feature/20261102-TBOARD-405").expect("parses with no title");
     assert_eq!(bare.ticket, TicketRef("TBOARD-405".into()));
     assert_eq!(bare.short_title, "");
 }
@@ -78,14 +91,14 @@ fn parse_rejects_other_shapes() {
         "feature/20261102-eng-1-login",
         "feature/sub/20261102-ENG-1-login",
     ] {
-        assert_eq!(BranchName::parse(n), None, "{n}");
+        assert_eq!(recognize(n), None, "{n}");
     }
 }
 
 // SLICE-2-9
 #[test]
 fn parse_does_not_confuse_ticket_numbers() {
-    let b = BranchName::parse("feature/20261102-ENG-12-other").unwrap();
+    let b = recognize("feature/20261102-ENG-12-other").unwrap();
     assert_eq!(b.ticket, TicketRef("ENG-12".into()));
     assert_ne!(b.ticket, TicketRef("ENG-1".into()));
 }

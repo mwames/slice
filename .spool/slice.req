@@ -87,13 +87,15 @@ requirements:
       that day, the most recently updated entry dated today whose notes name
       T. A branch belongs to a feature, the ticket, and a slice is one step
       of it: every slice of T works on T's one branch and worktree. The
-      branch is named <type>/<yyyymmdd>-<T>-<short title>, for example
+      branch is named by the repository's template (SLICE-11), by default
+      <type>/<yyyymmdd>-<T>-<short title>, for example
       feature/20261102-TBOARD-405-dashboard: the type is chosen by the
       caller, who infers it from the ticket's content; the date is the day
       the branch is created; T stays uppercase so cu and mon can read the
       ticket from the branch; the short title is the ticket title lowercased
       with words joined by hyphens, cut to about 40 characters. T's branch is
-      the one whose name has that shape with T after the date. Slice ids are
+      the one whose name matches the repository's template with T as its
+      ticket. Slice ids are
       internal to slice and never appear in Harvest notes, on tickets, or in
       branch names; commits made during a slice carry its id in their
       message, by convention rather than by anything slice enforces.
@@ -145,7 +147,8 @@ requirements:
         status: active
         description: >
           Given an active slice for ticket T with its timer running,
-          when slice open is run with ticket T,
+          when slice open is run with ticket T in a repository already in
+          the slice,
           then it reports that the slice is already open, changes nothing,
           and exits zero.
 
@@ -225,7 +228,8 @@ requirements:
         status: active
         description: >
           Given an active slice for ticket T and no running Harvest timer,
-          when slice open is run with ticket T,
+          when slice open is run with ticket T in a repository already in
+          the slice,
           then T's entry for today is running, restarted if it exists and
           started otherwise,
           the ticket, branch, worktree, and manifest are unchanged,
@@ -248,8 +252,9 @@ requirements:
           created still exists, every entry that existed before is still
           there and running or stopped as it was, no branch or worktree it
           created still exists, every branch and worktree that existed
-          before still does, no manifest exists for the slice, and the
-          ticket's status is what it was before the run.
+          before still does, no manifest it created still exists and any
+          manifest that existed before is as it was, the active slice is as
+          it was, and the ticket's status is what it was before the run.
 
   - id: SLICE-3
     title: Slice Pause
@@ -978,3 +983,318 @@ requirements:
           changes what is staged for a path outside the role's write set;
           when it exits non-zero, the repository's index and working tree
           are as they were before the run.
+
+  - id: SLICE-10
+    title: Multi-Repository Slice
+    description: >
+      A slice can span several repositories, each with its own branch,
+      worktree and base commit. Running slice open with the active
+      slice's ticket in a repository the slice doesn't have yet adds that
+      repository to the slice, at any point while the slice is active.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-12
+    rationale: >
+      Some tickets need changes in more than one repository, and which
+      ones often isn't known until the work is under way, so a slice
+      can't require its repositories up front. Opening in the new
+      repository is the natural gesture, and it used to report the slice
+      already open while leaving that repository without a branch.
+      The ticket, timer, ticket status and slice id stay per slice; only
+      the branch, worktree and base commit are per repository. Every
+      repository's branch is named from the same type, date and title, the
+      ones of the branch in the repository the slice was opened in, written
+      with the repository's own template (SLICE-11), so the merge requests
+      line up and a repository added on a later day doesn't get a different
+      date. A repository that
+      already has a branch for the ticket, from an earlier slice, keeps
+      it. A repository is identified by its main working tree, so running
+      from one of its worktrees, which is where slice work happens, names
+      the same repository rather than placing worktrees inside a
+      worktree. A later slice of the same ticket starts with the
+      repository it is opened in and gains the others the same way,
+      picking up their existing branches. Close, abandon, pause and
+      resume act on the slice and leave every repository's branch and
+      worktree as they are. State written before this change has one
+      repository and must keep working, since a slice may be active when
+      slice is upgraded.
+    superseded_by:
+    out_of_scope:
+      - Removing a repository from a slice
+      - Pushing, or opening merge requests, across repositories
+      - Which repository owns the spec, and locking or verifying across
+        repositories
+      - Running agents across repositories; slice run works in one
+    acceptance_criteria:
+      - id: SLICE-10-1
+        title: Repository Added
+        status: active
+        description: >
+          Given an active slice for T opened in repository A, with its
+          timer running, and a repository R not in the slice that has no
+          branch for T,
+          when slice open is run with T in R,
+          then R has a branch named by R's template from the type, date,
+          ticket and title of A's branch for the slice (SLICE-11-9), which
+          is A's branch name when both use the same template, based on
+          --base or R's HEAD, and its worktree; the manifest and
+          the active slice list A and R, each with its branch, worktree and
+          base commit; A's entry, the timer, the Harvest entry and the
+          ticket status are unchanged; it reports the repository added with
+          its branch and worktree; and it exits zero.
+
+      - id: SLICE-10-2
+        title: Type Taken From The Slice
+        status: active
+        description: >
+          Given the starting state of SLICE-10-1,
+          when slice open is run with T in R with no --type, or with the
+          type of A's branch,
+          then R is added as in SLICE-10-1; and when it is run with any
+          other --type,
+          then it fails, names A's branch, changes nothing, and exits
+          non-zero.
+
+      - id: SLICE-10-3
+        title: Existing Branch In Added Repository
+        status: active
+        description: >
+          Given an active slice for T and a repository R not in the slice
+          that has exactly one branch for T, with any date or type in its
+          name, with or without its worktree,
+          when slice open is run with T in R without --base,
+          then R is added with that branch, its worktree exists, creating
+          it if missing, no branch is created, and R's base commit is the
+          branch's head; with --base it fails as in SLICE-2-10, and with
+          more than one branch for T in R it fails as in SLICE-2-12.
+
+      - id: SLICE-10-4
+        title: Adding Restarts A Stopped Timer
+        status: active
+        description: >
+          Given an active slice for T with no running Harvest timer and a
+          repository R not in the slice,
+          when slice open is run with T in R,
+          then R is added as in SLICE-10-1 or SLICE-10-3 and T's entry for
+          today is running, restarted if it exists and started otherwise.
+
+      - id: SLICE-10-5
+        title: Adding Refused On Mismatch
+        status: active
+        description: >
+          Given an active slice for T and a running Harvest timer for
+          another ticket or for no ticket,
+          when slice open is run with T in a repository not in the slice,
+          then it reports the mismatch with both values, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-10-6
+        title: Failed Add Undone
+        status: active
+        description: >
+          Given a step of adding repository R fails after an earlier step
+          of the same run succeeded,
+          when slice open is run with T in R,
+          then the earlier steps are undone in reverse order, removing a
+          branch or worktree only if this run created it, deleting an entry
+          only if this run created it, and stopping an existing entry only
+          if this run restarted it, the manifest and
+          the active slice list the repositories they listed before, it
+          reports which step failed, and it exits non-zero.
+
+      - id: SLICE-10-7
+        title: Worktree Names Its Repository
+        status: active
+        description: >
+          Given a directory inside a worktree of repository R, whether the
+          current directory or --repo,
+          when slice open is run from it,
+          then the request is for R: the branch is looked for, and the
+          worktree created, as they would be when running in R's main
+          working tree, and a slice whose repositories include R treats it
+          as already present.
+
+      - id: SLICE-10-8
+        title: Status Lists Repositories
+        status: active
+        description: >
+          Given an active slice with one or more repositories,
+          when status, open, pause, resume, close or abandon reports the
+          slice,
+          then each repository is listed with its path, branch and
+          worktree, in the order they were added, in both text and JSON.
+
+      - id: SLICE-10-9
+        title: Earlier State Read
+        status: active
+        description: >
+          Given an active slice and its manifest written by slice before
+          this change, holding one repository, branch, worktree and base
+          commit,
+          when any slice command runs,
+          then the slice reads as having that one repository, with that
+          branch, worktree and base commit, and repositories can be added
+          to it; and every manifest written before this change still reads.
+
+    invariants:
+      - id: SLICE-10-INV-1
+        title: Other Repositories Untouched
+        status: active
+        description: >
+          For every run of slice open that adds a repository or fails to,
+          every repository already in the slice keeps its branch, worktree
+          and base commit, and its branch and worktree are unchanged on
+          disk.
+
+  - id: SLICE-11
+    title: Branch Template
+    description: >
+      The name of a ticket's branch comes from a template chosen per
+      repository in slice's config. The same template names new branches
+      and recognizes a ticket's existing branch.
+    status: active
+    interface: src/ports.rs
+    deciders:
+      - Matt Ames
+    consulted: []
+    date: 2026-11-12
+    rationale: >
+      Repositories have their own conventions for branch names, and some
+      depend on them: the provision repositories' CI reads the ticket with
+      sed 's/.*FIN-\([0-9]*\)_.*/FIN-\1/', so the ticket must be followed
+      by an underscore, and a branch slice named with a hyphen had to be
+      renamed by hand. The templates live in the user's
+      ~/.config/slice/config.toml, not in the repositories, because they
+      are shared team repositories and the convention is the user's to
+      apply; entries are matched by path so one entry can cover a
+      directory of repositories. A template is literal text with
+      placeholders: {type}, the branch type; {date}, the creation day as
+      yyyymmdd; {yyyy}, {mm} and {dd}, its parts; {ticket}, the ticket
+      reference; and {title}, the short title as in SLICE-2. {ticket} and
+      {title} are required, since a branch must name its ticket and be
+      readable; {type} and the date are optional, since some conventions
+      leave them out. Recognizing a branch reverses the template: {type}
+      matches one or more lowercase ASCII letters, {date} eight digits,
+      {yyyy} four, {mm} and {dd} two, {ticket} a ticket reference
+      (uppercase letters and digits starting with a letter, a hyphen, then
+      digits), {title} any characters, and literal text itself, and the
+      whole name must match. Two placeholders with nothing between them
+      can't be told apart unless one has a fixed width, so that is refused.
+      A repository with no matching entry keeps the default template,
+      {type}/{date}-{ticket}-{title}, so nothing changes for it. In a
+      repository with a configured template, a branch named only by the
+      default is not recognized as the ticket's: one template per
+      repository keeps the lookup unambiguous. In a multi-repository slice
+      each repository's branch is written with its own template from the
+      parts of the first repository's branch.
+    superseded_by:
+    out_of_scope:
+      - Templates committed in a repository's .slice.toml
+      - Renaming existing branches to match a template
+      - Transforming the title beyond SLICE-2's short title, such as
+        joining words with underscores
+    acceptance_criteria:
+      - id: SLICE-11-1
+        title: Default Template
+        status: active
+        description: >
+          Given no config entry whose path matches repository R,
+          when slice open names or looks for T's branch in R,
+          then it uses the template {type}/{date}-{ticket}-{title}, naming
+          and recognizing branches exactly as before this requirement.
+
+      - id: SLICE-11-2
+        title: Configured Template Names New Branch
+        status: active
+        description: >
+          Given a config entry whose path matches repository R with branch
+          template {type}/{date}-{ticket}_{title}, and no branch for T in R,
+          when slice open is run with T and --type feature in R on
+          2026-11-12,
+          then the branch created is feature/20261112-T_<short title>, and
+          its worktree is named from it with each / replaced by -, as
+          before.
+
+      - id: SLICE-11-3
+        title: Configured Template Finds Branch
+        status: active
+        description: >
+          Given a config entry whose path matches repository R with branch
+          template {type}/{date}-{ticket}_{title},
+          when slice open is run with T in R,
+          then a branch in R that matches that template with T as its
+          ticket is T's branch, as in SLICE-2-9 to SLICE-2-12, and a branch
+          that matches only the default template is not.
+
+      - id: SLICE-11-4
+        title: Placeholders
+        status: active
+        description: >
+          Given branch template {yyyy}/{mm}/{dd}/{ticket}_{title} for
+          repository R,
+          when slice open creates T's branch in R on 2026-11-02,
+          then it is named 2026/11/02/T_<short title>; and given template
+          {type}/{date}-{ticket}-{title}, a branch named from it is
+          recognized with the type, date, ticket and title it was named
+          from, for every type, date, ticket and short title.
+
+      - id: SLICE-11-5
+        title: Entry Matching
+        status: active
+        description: >
+          Given config entries in the order they appear, each with a path
+          in which ~ means the home directory and * matches any characters
+          within one path segment,
+          when slice open is run in repository R,
+          then R's template is the branch template of the first entry
+          whose path matches R's main working tree as a whole path, and an
+          entry that matches only a parent or child directory of R does not
+          apply.
+
+      - id: SLICE-11-6
+        title: Template Without Type
+        status: active
+        description: >
+          Given a branch template for repository R without {type},
+          when slice open is run with T in R, with or without --type,
+          then --type is neither required nor used, and the open otherwise
+          completes as in SLICE-2.
+
+      - id: SLICE-11-7
+        title: Invalid Template Refused
+        status: active
+        description: >
+          Given a config entry with no path, no branch template, or a
+          template that lacks {ticket} or {title}, uses a placeholder more
+          than once, names an unknown placeholder, has an unmatched brace,
+          or puts two placeholders next to each other where neither is
+          {date}, {yyyy}, {mm} or {dd},
+          when any slice command is run,
+          then it fails naming the entry and the problem, changes nothing,
+          and exits non-zero.
+
+      - id: SLICE-11-8
+        title: Empty Title
+        status: active
+        description: >
+          Given a ticket whose short title is empty,
+          when slice open names its branch with any template,
+          then {title} and the literal text directly before it are left
+          out, as the default template did before this requirement.
+
+      - id: SLICE-11-9
+        title: Added Repository Uses Its Own Template
+        status: active
+        description: >
+          Given an active slice for T whose first repository A has branch
+          B, and a repository R not in the slice, with no branch for T and
+          a template different from A's,
+          when slice open is run with T in R,
+          then R's new branch is R's template written with the type, date,
+          ticket and title B was named with; where B's template has no
+          {type} and R's does, the type is --type, and without --type it
+          fails as in SLICE-2-11; and where B's name gives no full date
+          ({date}, or {yyyy}, {mm} and {dd}), the date is today.

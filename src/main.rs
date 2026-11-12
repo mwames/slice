@@ -82,7 +82,7 @@ fn run(args: &[String]) -> Result<u8, String> {
     }
 
     let config = Config::load()?;
-    let settings = config.settings();
+    let settings = config.settings()?;
     let harvest = Harvest::new(&config.harvest.project, &config.harvest.task);
     let tickets = Tickets::new();
     let state = FileState::new(FileState::default_dir());
@@ -111,7 +111,7 @@ fn run(args: &[String]) -> Result<u8, String> {
                 Some(repo) => repo,
                 None => std::env::current_dir().map_err(|e| e.to_string())?,
             };
-            let repo = Git::toplevel(&dir).map_err(|e| e.to_string())?;
+            let repo = Git::repository(&dir).map_err(|e| e.to_string())?;
             let request = OpenRequest {
                 ticket: TicketRef(ticket.trim().to_uppercase()),
                 repo,
@@ -119,22 +119,14 @@ fn run(args: &[String]) -> Result<u8, String> {
                 base: flags.base,
             };
             Ok(print_result(open(&deps, &request), flags.json, |o| match o {
-                OpenOutcome::Opened(s) => (
-                    "opened",
-                    format!(
-                        "opened {} on branch {}\n  worktree {}",
-                        s.id.0,
-                        s.branch,
-                        s.worktree.display()
-                    ),
-                    s,
-                ),
+                OpenOutcome::Opened(s) => ("opened", opened_text(s), s),
                 OpenOutcome::AlreadyOpen(s) => ("already_open", format!("{} is already open", s.id.0), s),
                 OpenOutcome::Resumed(s) => (
                     "resumed",
                     format!("{} was paused; its timer is running again", s.id.0),
                     s,
                 ),
+                OpenOutcome::Added(s) => ("added", added_text(s), s),
             }))
         }
         "pause" | "resume" | "close" | "abandon" if !flags.positional.is_empty() => Err(USAGE.to_string()),
@@ -153,8 +145,10 @@ fn run(args: &[String]) -> Result<u8, String> {
                 (
                     "closed",
                     format!(
-                        "closed {}; {} moved to {to}; branch {} kept",
-                        s.id.0, s.ticket.0, s.branch
+                        "closed {}; {} moved to {to}; {} kept",
+                        s.id.0,
+                        s.ticket.0,
+                        kept_branches(s)
                     ),
                     s,
                 )
@@ -167,6 +161,36 @@ fn run(args: &[String]) -> Result<u8, String> {
         }
         other => Err(format!("unknown command {other}\n{USAGE}")),
     }
+}
+
+/// `repo: branch (worktree)` for each repository of the slice, one per line.
+fn repo_lines(s: &ActiveSlice) -> String {
+    s.repos
+        .iter()
+        .map(|r| format!("  {}: {} ({})", r.repo.display(), r.branch, r.worktree.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The new slice's branch and worktree (SLICE-10-8).
+fn opened_text(s: &ActiveSlice) -> String {
+    format!("opened {}\n{}", s.id.0, repo_lines(s))
+}
+
+/// The added repository, the last of the slice's, with its branch and
+/// worktree (SLICE-10-1, 10-8).
+fn added_text(s: &ActiveSlice) -> String {
+    let added = ActiveSlice {
+        repos: s.repos.last().cloned().into_iter().collect(),
+        ..s.clone()
+    };
+    format!("added a repository to {}\n{}", s.id.0, repo_lines(&added))
+}
+
+/// The slice line of status: id, ticket, and each repository with its
+/// branch and worktree (SLICE-10-8).
+fn status_text(s: &ActiveSlice) -> String {
+    format!("slice:  {} for {}\n{}", s.id.0, s.ticket.0, repo_lines(s))
 }
 
 fn opt_ref(r: &Option<TicketRef>) -> String {
@@ -202,13 +226,7 @@ fn print_status(result: PortResult<StatusReport>, as_json: bool) -> u8 {
         println!("{out}");
     } else {
         match &report.active {
-            Some(s) => println!(
-                "slice:  {} ({})  branch {}  worktree {}",
-                s.id.0,
-                s.ticket.0,
-                s.branch,
-                s.worktree.display()
-            ),
+            Some(s) => println!("{}", status_text(s)),
             None => println!("slice:  none active"),
         }
         match &report.timer {
